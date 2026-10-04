@@ -24,7 +24,7 @@ if errorlevel 1 (
 )
 if /i not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
   if /i not "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
-    echo [!] Unsupported CPU (%PROCESSOR_ARCHITECTURE%). 64-bit Windows is required.
+    echo [!] Unsupported CPU %PROCESSOR_ARCHITECTURE%. 64-bit Windows required - stopping.
     pause & exit /b 1
   )
 )
@@ -44,18 +44,18 @@ REM ---------- [2/5] Python ----------
 echo [2/5] Installing Python automatically ...
 where winget >nul 2>nul
 if %errorlevel%==0 (
-  echo     Trying winget (minutes, needs internet) ...
+  echo     Trying winget - minutes, needs internet ...
   winget install -e --id Python.Python.3.12 --silent --disable-interactivity --accept-source-agreements --accept-package-agreements >> "%LOG%" 2>&1
   call :find_python
 )
 if not defined PY (
-  echo     Downloading official Python (once, ~30MB) ...
+  echo     Downloading official Python - once, ~30MB ...
   set "PYSETUP=%TEMP%\python-setup.exe"
   if exist "%TEMP%\python-setup.exe" del "%TEMP%\python-setup.exe"
   powershell -NoProfile -Command "Invoke-WebRequest -Uri '!PYURL!' -OutFile $env:PYSETUP" >> "%LOG%" 2>&1
   if not exist "%TEMP%\python-setup.exe" goto no_python
   for %%S in ("%TEMP%\python-setup.exe") do if %%~zS LSS 20000000 goto dl_bad
-  echo     Installing silently (2-4 minutes, no clicks) ...
+  echo     Installing silently - 2-4 minutes, no clicks ...
   "%TEMP%\python-setup.exe" /quiet InstallAllUsers=0 PrependPath=0 Include_test=0 AssociateFiles=0 >> "%LOG%" 2>&1
   call :find_python
 )
@@ -139,7 +139,7 @@ echo [4/5] Installing libraries (takes a few minutes, resume-safe) ...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip --retries 3 --timeout 60 >> "%LOG%" 2>&1
 ".venv\Scripts\python.exe" -m pip install --retries 3 --timeout 60 -r requirements.txt >> "%LOG%" 2>&1
 if errorlevel 1 (
-  echo [!] Library install failed (internet? proxy? space?). Re-run install.bat to resume.
+  echo [!] Library install failed - internet? proxy? space? Re-run install.bat to resume.
   echo     Behind a company proxy? Tell support the proxy address.
   pause & exit /b 1
 )
@@ -150,7 +150,7 @@ echo [5/5] Downloading scraper browser (once, ~150MB) ...
 if errorlevel 1 (echo [!] Browser download failed - the app will retry it automatically later.)
 if not exist ".env" (
   copy /y ".env.example" ".env" >nul
-  echo     The translation key is entered inside the app (API button).
+  echo     The translation key is entered inside the app [API button].
 )
 echo.
 echo [+] Done. Double-click start_server.bat to launch. (Step 5/5 complete)
