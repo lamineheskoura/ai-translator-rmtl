@@ -80,7 +80,7 @@ scrape_tasks_lock = threading.Lock()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost)(:\d+)?",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,7 +96,8 @@ def _resolve_output_dir() -> Path:
     """Base manga folder: env MANGA_OUTPUT_DIR > config.json > ./output.
 
     Every manga gets its own subfolder by slug; chapters of the same
-    manga always land in that same folder.
+    manga always land in that same folder. A stale absolute path from
+    another machine (config copied over) is ignored safely.
     """
     env = (os.environ.get("MANGA_OUTPUT_DIR", "") or "").strip()
     if env:
@@ -105,15 +106,23 @@ def _resolve_output_dir() -> Path:
         if APP_CONFIG_FILE.exists():
             cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8"))
             if cfg.get("output_dir"):
-                return Path(cfg["output_dir"])
+                p = Path(cfg["output_dir"])
+                if p.exists() or p == Path(__file__).parent.parent / "output":
+                    return p
+                print(f"[i] Ignoring stale output_dir from another machine: {p}")
     except Exception:
         pass
     return Path(__file__).parent.parent / "output"
 
 
 OUTPUT_DIR = _resolve_output_dir()
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-FONTS_USER_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    FONTS_USER_DIR.mkdir(parents=True, exist_ok=True)
+except PermissionError as e:
+    raise RuntimeError(
+        "Cannot write the app folder (read-only? OneDrive lock?). "
+        f"Move the app elsewhere or set another manga folder. [{e}]")
 
 
 class OutputDirPayload(BaseModel):

@@ -1,15 +1,14 @@
 @echo off
-REM Manga AI Editor - launcher. Uses .venv when present, system python otherwise.
-REM Runs in the foreground so errors stay visible. Ctrl+C to stop.
+REM Manga AI Editor - daily launcher. Runs in the foreground so errors stay visible.
+chcp 65001 >nul 2>nul
 cd /d "%~dp0"
-if exist ".venv\Scripts\python.exe" (
-  set "PY=.venv\Scripts\python.exe"
-) else (
-  set "PY=python"
+if not exist ".venv\Scripts\python.exe" (
+  echo [!] Not installed yet. Double-click install.bat first (once), then this file.
+  pause & exit /b 1
 )
-%PY% -u main.py %*
+".venv\Scripts\python.exe" -u main.py %*
 if errorlevel 1 (
   echo.
-  echo [!] Server exited with an error. If packages are missing, run install.bat first.
+  echo [!] Server stopped with an error. If this repeats, re-run install.bat (repairs only).
   pause
 )

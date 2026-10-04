@@ -94,18 +94,67 @@ def ensure_fonts() -> None:
 def pick_free_port(host: str, start: int, tries: int = 11) -> int:
     import socket
     for p in range(start, start + tries):
+        s = socket.socket()
         try:
-            with socket.create_connection((host, p), timeout=0.5):
-                continue  # busy
+            s.bind((host, p))
+            s.close()
+            return p  # truly free (bind-tested, not just probed)
         except OSError:
-            return p  # free
-    return start
+            try:
+                s.close()
+            except Exception:
+                pass
+            continue
+    # Every preferred port busy: let the OS pick a random free one.
+    s = socket.socket()
+    s.bind((host, 0))
+    port = s.getsockname()[1]
+    s.close()
+    print(f"[i] Ports {start}-{start + tries - 1} busy, using random port {port}")
+    return port
+
+
+APP_LOCK_FILE = ROOT / "output" / ".manga.lock"
+
+
+def single_instance_or_exit(host: str, port: int) -> None:
+    """Prevent two app copies from corrupting chapters/queue.
+
+    If a live server answers on --port (or neighbours), open the browser
+    on it and exit instead of starting a second copy.
+    """
+    import json
+    import urllib.request
+    for p in range(port, port + 12):
+        try:
+            with urllib.request.urlopen(f"http://{host}:{p}/api/chapters",
+                                        timeout=1) as r:
+                if r.status == 200:
+                    print(f"[i] App already running on {host}:{p} - opening it.")
+                    webbrowser.open(f"http://{host}:{p}")
+                    raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception:
+            continue
+    try:
+        APP_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        APP_LOCK_FILE.write_text(json.dumps({"port": port}), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def start_server(host: str = "127.0.0.1", port: int = 8000, open_browser: bool = True):
     """Start the web editor server."""
-    ensure_dirs()
+    import os
+    try:
+        ensure_dirs()
+    except PermissionError as e:
+        print(f"[!] {e}")
+        input("Press Enter to exit...")
+        raise SystemExit(1)
     ensure_fonts()
+    single_instance_or_exit(host, port)
     port = pick_free_port(host, port)
     # Fix for Windows cp1252 console - use simple ASCII
     print(f"""
@@ -168,8 +217,8 @@ def main():
                         help="Показать окно браузера при скрейпинге")
     parser.add_argument("--host", type=str, default="127.0.0.1",
                         help="Хост для веб-сервера (по умолч. 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8000,
-                        help="Порт для веб-сервера (по умолч. 8000)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Порт для веб-сервера (по умолч. MANGA_PORT أو 8000)")
     parser.add_argument("--no-browser", action="store_true",
                         help="Не открывать браузер автоматически")
 
@@ -181,9 +230,14 @@ def main():
             headless=not args.no_headless,
         )
     else:
+        import os
+        try:
+            port = int(args.port or os.environ.get("MANGA_PORT", "") or 8000)
+        except ValueError:
+            port = 8000
         start_server(
             host=args.host,
-            port=args.port,
+            port=port,
             open_browser=not args.no_browser,
         )
 
