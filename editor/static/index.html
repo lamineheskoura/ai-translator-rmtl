@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manga AI Editor</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app-loader">
+  <div class="loader-content">
+    <div class="loader-spinner"></div>
+    <div class="loader-text">جاري تحميل المحرر...</div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+
+  <!-- ===== MENU BAR ===== -->
+  <header id="menubar">
+    <div class="menubar-left">
+      <span class="app-logo">Manga AI Editor</span>
+      <span class="menubar-sep">|</span>
+      <button class="menu-btn" onclick="showChapterSelector()" title="فتح فصل موجود">فتح</button>
+      <button class="menu-btn" onclick="showScrapeModal()" title="تحميل فصل من manhuarmtl.com">تحميل</button>
+      <button class="menu-btn" onclick="saveAll()" title="حفظ التغييرات">حفظ</button>
+      <button class="menu-btn" onclick="showExportModal()" title="تصدير الصفحات">تصدير</button>
+      <span class="menubar-sep">|</span>
+      <button class="menu-btn" onclick="autoTranslate()" title="ترجمة آلية عبر API">ترجمة AI</button>
+      <button class="menu-btn" onclick="retryTranslate()" title="إعادة ترجمة النصوص الفاشلة/الفارغة فقط">🔁 إعادة الترجمة</button>
+      <button class="menu-btn" onclick="showProviderModal()" title="خدمات الترجمة عبر الإنترنت (API)">API</button>
+      <span class="menubar-sep">|</span>
+      <button class="menu-btn" onclick="exportChapterText()" title="تصدير نصوص الفصل">تصدير نص</button>
+      <button class="menu-btn" onclick="showTextImportModal()" title="استيراد نصوص الفصل">استيراد نص</button>
+      <button class="menu-btn" onclick="showSettingsModal()" title="الإعدادات (مجلد المانهوا)">⚙ إعدادات</button>
+    </div>
+    <div class="menubar-right">
+      <span id="chapter-title-display" class="chapter-label">—</span>
+      <span class="menubar-sep">|</span>
+      <button class="menu-btn menu-btn-danger" onclick="shutdownServer()" title="إيقاف التطبيق">إيقاف</button>
+    </div>
+  </header>
+
+  <!-- ===== DOWNLOAD QUEUE ===== -->
+  <div id="download-bar" class="hidden">
+    <div id="download-items"></div>
+  </div>
+
+  <!-- ===== MAIN LAYOUT ===== -->
+  <div id="main-layout">
+
+    <aside id="left-tool-dock">
+      <div class="dock-brand">
+        <div class="dock-brand-mark">Ps</div>
+        <div class="dock-brand-text">
+          <strong>Manga</strong>
+          <span>Workspace</span>
+        </div>
+      </div>
+
+      <div class="dock-section">
+        <div class="dock-section-title">أدوات</div>
+        <button class="dock-btn active" data-tool="select" onclick="setTool('select')" id="tool-select" title="تحديد النصوص">
+          <span class="dock-btn-icon">⌖</span>
+          <span class="dock-btn-label">تحديد</span>
+        </button>
+        <button class="dock-btn" data-tool="pan" onclick="setTool('pan')" id="tool-pan" title="تحريك اللوحة">
+          <span class="dock-btn-icon">✥</span>
+          <span class="dock-btn-label">تحريك</span>
+        </button>
+        <button class="dock-btn" onclick="addNewText()" title="إضافة نص جديد">
+          <span class="dock-btn-icon">T+</span>
+          <span class="dock-btn-label">نص جديد</span>
+        </button>
+        <button class="dock-btn" onclick="deleteSelected()" title="حذف النص المحدد">
+          <span class="dock-btn-icon">⌫</span>
+          <span class="dock-btn-label">حذف</span>
+        </button>
+        <button class="dock-btn" onclick="showFontUpload()" title="رفع خط جديد">
+          <span class="dock-btn-icon">F+</span>
+          <span class="dock-btn-label">خط جديد</span>
+        </button>
+      </div>
+
+      <div class="dock-section dock-section-bottom">
+        <div class="dock-section-title">لوحات</div>
+        <button class="dock-btn" onclick="toggleInspectorCompact()" title="تصغير لوحة الخصائص">
+          <span class="dock-btn-icon">◧</span>
+          <span class="dock-btn-label">تصغير اللوحة</span>
+        </button>
+        <button class="dock-btn" onclick="togglePropertiesPanel()" title="إظهار أو إخفاء لوحة الخصائص">
+          <span class="dock-btn-icon">▣</span>
+          <span class="dock-btn-label">إظهار الخصائص</span>
+        </button>
+        <button class="dock-btn" onclick="toggleWorkspaceFocus()" title="وضعية تركيز الصورة">
+          <span class="dock-btn-icon">⛶</span>
+          <span class="dock-btn-label">تركيز</span>
+        </button>
+      </div>
+    </aside>
+
+    <div id="stage-area">
+      <div id="toolbar">
+        <div class="toolbar-group toolbar-group-title">
+          <div class="toolbar-meta">
+            <span class="toolbar-kicker">Document</span>
+            <span class="toolbar-heading">لوحة التحرير</span>
+          </div>
+        </div>
+        <div class="toolbar-group" id="toolbar-pagination">
+          <button class="tool-btn" onclick="prevPage()" title="الصفحة السابقة">◀</button>
+          <span id="page-indicator">1 / 1</span>
+          <button class="tool-btn" onclick="nextPage()" title="الصفحة التالية">▶</button>
+          <input type="number" id="page-jump" min="1" value="1" onchange="jumpToPage(this.value)" title="رقم الصفحة">
+        </div>
+        <div class="toolbar-group">
+          <button class="tool-btn" id="view-mode-btn" onclick="toggleViewMode()" title="تبديل إلى عرض صفحة واحدة">صفحة واحدة</button>
+        </div>
+        <div class="toolbar-group">
+          <button class="tool-btn" onclick="zoomIn()" title="تكبير">+</button>
+          <button class="tool-btn" onclick="zoomOut()" title="تصغير">−</button>
+          <button class="tool-btn" onclick="zoomFit()" title="ملاءمة الشاشة">⊡</button>
+          <select id="zoom-select" onchange="setZoom(this.value)">
+            <option value="0.25">25%</option>
+            <option value="0.5">50%</option>
+            <option value="0.75">75%</option>
+            <option value="1" selected>100%</option>
+            <option value="1.5">150%</option>
+            <option value="2">200%</option>
+            <option value="3">300%</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <button class="tool-btn" onclick="undo()" title="تراجع (Ctrl+Z)">↩</button>
+          <button class="tool-btn" onclick="redo()" title="إعادة (Ctrl+Y)">↪</button>
+        </div>
+        <div class="toolbar-group" id="editor-mode-group" title="وضع المحرر">
+          <button class="tool-btn editor-mode-btn active" id="editor-mode-review" onclick="setEditorMode('review')" title="وضع المراجعة: تحرير بضغطة + قبول/يحتاج إصلاح">مراجعة</button>
+          <button class="tool-btn editor-mode-btn" id="editor-mode-view" onclick="setEditorMode('view')" title="وضع المشاهدة: عرض فقط بدون تحرير">مشاهدة</button>
+          <button class="tool-btn editor-mode-btn" id="editor-mode-edit" onclick="setEditorMode('edit')" title="وضع التحرير الكامل">تحرير</button>
+        </div>
+        <div class="toolbar-group toolbar-group-layout">
+          <button class="tool-btn" onclick="toggleInspectorCompact()" title="تصغير لوحة الخصائص">لوحة ضيقة</button>
+          <button class="tool-btn" onclick="togglePropertiesPanel()" title="إظهار أو إخفاء لوحة الخصائص">خصائص</button>
+          <button class="tool-btn" onclick="toggleWorkspaceFocus()" title="توسيع مساحة الصورة">تركيز</button>
+        </div>
+      </div>
+
+      <div id="canvas-container">
+        <div id="canvas-wrapper">
+          <div id="pages-stack"></div>
+        </div>
+        <div id="page-loading" class="hidden">جاري تحميل الصفحة...</div>
+      </div>
+    </div>
+
+    <aside id="properties-panel">
+      <div class="inspector-topbar">
+        <div class="inspector-copy">
+          <span class="inspector-kicker">Inspector</span>
+          <strong class="inspector-heading">خصائص العنصر</strong>
+        </div>
+        <div class="inspector-actions">
+          <button class="panel-icon-btn" onclick="toggleInspectorCompact()" title="تصغير اللوحة">◧</button>
+          <button class="panel-icon-btn" onclick="togglePropertiesPanel()" title="إخفاء اللوحة">✕</button>
+        </div>
+      </div>
+
+      <div id="prop-none" class="prop-section">
+        <div class="prop-empty">اختر نصاً لتحرير خصائصه</div>
+      </div>
+
+      <!-- Text Properties -->
+      <div id="prop-text" class="hidden">
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">النص الإنجليزي</span>
+          </div>
+          <div id="prop-original" class="prop-original-text" style="font-size:11px;color:var(--text-dim);padding:4px 6px;background:var(--bg-input);border-radius:var(--radius);min-height:20px;word-break:break-all;"></div>
+        </div>
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">النص العربي</span>
+          </div>
+          <textarea id="prop-content" rows="3" oninput="onPropChange()"></textarea>
+        </div>
+
+        <div class="panel-section" id="review-section">
+          <div class="panel-header">
+            <span class="panel-title">المراجعة</span>
+          </div>
+          <div id="review-status-label" style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">الحالة: بانتظار المراجعة</div>
+          <div style="display:flex;gap:6px;">
+            <button class="action-btn apply-page-btn" style="margin-top:0;" onclick="approveSelected('approved')">مقبول ✓</button>
+            <button class="action-btn" style="margin-top:0;border-color:var(--warning);color:var(--warning);" onclick="approveSelected('needs_fix')">يحتاج إصلاح ⚠</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">الخط والحجم</span>
+          </div>
+          <label class="prop-label">الخط</label>
+          <select id="prop-font" onchange="onPropChange()">
+            <option value="Hayah">Hayah</option>
+            <option value="Traditional Arabic">Traditional Arabic</option>
+          </select>
+
+          <label class="prop-label" style="margin-top:8px">الحجم <span id="prop-size-val">45</span>px</label>
+          <input type="range" id="prop-size" min="6" max="200" value="45" oninput="onPropChange()">
+
+          <label class="prop-label" style="margin-top:8px">تباعد السطور <span id="prop-line-height-val">1.10</span></label>
+          <input type="range" id="prop-line-height" min="0.7" max="2.5" step="0.05" value="1.1" oninput="onPropChange()">
+
+          <div class="stack-actions">
+            <button class="action-btn" onclick="applyFontSizeToAll()">تطبيق حجم الخط على كل النصوص</button>
+            <button class="action-btn" onclick="smartFitTexts('all')">ضبط ذكي لكل النصوص</button>
+            <button class="action-btn" onclick="smartFitTexts('page')">ضبط ذكي للصفحة الحالية</button>
+          </div>
+
+          <label class="prop-label" style="margin-top:8px">المحاذاة</label>
+          <div class="align-row">
+            <button class="align-btn" data-align="left" onclick="setAlign('left')">يسار</button>
+            <button class="align-btn active" data-align="center" onclick="setAlign('center')">وسط</button>
+            <button class="align-btn" data-align="right" onclick="setAlign('right')">يمين</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">لون النص</span>
+          </div>
+          <div class="color-row">
+            <input type="color" id="prop-color" value="#000000" oninput="onPropChange()">
+            <input type="text" id="prop-color-hex" value="#000000" onchange="onColorHexInput()" class="color-hex">
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">Stroke (حدود)</span>
+          </div>
+          <label class="prop-label" style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="prop-stroke-enable" checked onchange="onPropChange()">
+            تفعيل الـ Stroke
+          </label>
+          <div id="stroke-options">
+            <label class="prop-label" style="margin-top:8px">اللون</label>
+            <div class="color-row">
+              <input type="color" id="prop-stroke-color" value="#FFFFFF" oninput="onPropChange()">
+              <input type="text" id="prop-stroke-hex" value="#FFFFFF" onchange="onStrokeHexInput()" class="color-hex">
+            </div>
+            <label class="prop-label" style="margin-top:8px">السماكة <span id="prop-stroke-width-val">1</span>px</label>
+            <input type="range" id="prop-stroke-width" min="0" max="15" step="0.5" value="1" oninput="onPropChange()">
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">تطبيق النمط</span>
+          </div>
+          <button class="action-btn apply-all-btn" onclick="applyStyleToAll()">
+            تطبيق على كل النصوص
+          </button>
+          <button class="action-btn apply-page-btn" onclick="applyStyleToPage()" style="margin-top:6px">
+            تطبيق على الصفحة الحالية
+          </button>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">الموقع والحجم</span>
+          </div>
+          <div class="coord-row">
+            <div><label>X</label><input type="number" id="prop-x" onchange="onPropChange()"></div>
+            <div><label>Y</label><input type="number" id="prop-y" onchange="onPropChange()"></div>
+          </div>
+          <div class="coord-row">
+            <div><label>العرض</label><input type="number" id="prop-width" onchange="onPropChange()"></div>
+            <div><label>الارتفاع</label><input type="number" id="prop-height" onchange="onPropChange()"></div>
+          </div>
+          <label class="prop-label" style="margin-top:8px">التدوير <span id="prop-rotation-val">0°</span></label>
+          <input type="range" id="prop-rotation" min="-180" max="180" step="1" value="0" oninput="onPropChange()">
+        </div>
+      </div>
+
+      <!-- Page Properties -->
+      <div id="prop-page-section" class="hidden">
+        <div class="panel-section">
+          <div class="panel-header">
+            <span class="panel-title">معلومات الصفحة</span>
+          </div>
+          <p id="page-info-text" style="font-size:12px; color:var(--text-dim); margin:0;"></p>
+        </div>
+      </div>
+
+    </aside>
+  </div>
+
+  <!-- ===== STATUS BAR ===== -->
+  <footer id="statusbar">
+    <span id="status-left">جاهز</span>
+    <span id="status-center">—</span>
+    <span id="status-right">—</span>
+  </footer>
+</div>
+
+<!-- ===== CHAPTER SELECTOR MODAL ===== -->
+<div id="chapter-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideChapterSelector()"></div>
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>فتح فصل</h2>
+      <button class="modal-close" onclick="hideChapterSelector()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="chapter-list" class="chapter-list">
+        <div class="loading-chapters">جاري تحميل الفصول...</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn" onclick="hideChapterSelector()">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SCRAPE MODAL ===== -->
+<div id="scrape-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideScrapeModal()"></div>
+  <div class="modal-content" style="max-width:550px">
+    <div class="modal-header">
+      <h2>تحميل فصل جديد</h2>
+      <button class="modal-close" onclick="hideScrapeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text-dim); margin-bottom:12px;">أدخل رابط الفصل من manhuarmtl.com (تحميل رابط واحد — يعمل كما قبل):</p>
+      <input type="url" id="scrape-url" placeholder="https://manhuarmtl.com/manga/..." style="width:100%; height:36px; padding:0 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:13px;">
+      <p style="color:var(--text-dim); margin:10px 0 6px; font-size:12px;">أو رابط البداية لسلسلة فصول (يُستخدم معه عدد الفصول):</p>
+      <input type="url" id="scrape-start-url" placeholder="https://manhuarmtl.com/manga/.../chapter-1 (start_url)" style="width:100%; height:36px; padding:0 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:13px; direction:ltr; text-align:left;">
+      <div style="margin-top:12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <label style="font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px;">
+          عدد الفصول من start_url:
+          <input type="number" id="scrape-count" min="1" max="200" value="1" style="width:70px; height:28px; padding:0 8px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:4px;">
+        </label>
+        <label style="font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="scrape-translate" checked>
+          ترجمة تلقائية بعد التحميل (عبر API)
+        </label>
+        <label style="font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="scrape-headless" checked>
+          متصفح مخفي (headless)
+        </label>
+        <label style="font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px;">
+          متصفح:
+          <select id="scrape-browser" style="background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:4px; padding:2px 6px;">
+            <option value="brave">Brave</option>
+            <option value="chrome">Chrome</option>
+          </select>
+        </label>
+      </div>
+      <div style="margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <label style="font-size:12px; color:var(--text-dim);">مزود الترجمة:</label>
+        <select id="scrape-provider" style="flex:1; min-width:120px; height:30px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:4px; padding:0 6px;"></select>
+        <select id="scrape-provider-model" style="flex:2; min-width:150px; height:30px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:4px; padding:0 6px;"></select>
+      </div>
+      <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);">
+        <p style="color:var(--text-dim); margin-bottom:8px; font-size:12px;">— أو دفعة: عدة روابط (سطر لكل رابط) عبر POST /api/batch-scrape —</p>
+        <textarea id="scrape-urls-batch" rows="4" placeholder="https://manhuarmtl.com/manga/.../chapter-1&#10;https://manhuarmtl.com/manga/.../chapter-2" style="width:100%; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px; resize:vertical;"></textarea>
+      </div>
+      <div id="scrape-status" class="hidden" style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--text-dim); max-height:200px; overflow-y:auto; white-space:pre-wrap;"></div>
+      <div id="batch-status" class="hidden" style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--text-dim); max-height:200px; overflow-y:auto; white-space:pre-wrap;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn" onclick="hideScrapeModal()">إلغاء</button>
+      <button class="action-btn apply-all-btn" onclick="startScrape()">بدء التحميل</button>
+      <button class="action-btn" style="border-color:var(--accent);color:var(--accent);" onclick="startBatchScrape()">تحميل الدفعة</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== EXPORT MODAL ===== -->
+<div id="export-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideExportModal()"></div>
+  <div class="modal-content" style="max-width:500px">
+    <div class="modal-header">
+      <h2>تصدير الفصل</h2>
+      <button class="modal-close" onclick="hideExportModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="panel-section">
+        <div class="panel-header"><span class="panel-title">صيغة التصدير</span></div>
+        <select id="export-format" style="width:100%; height:34px;">
+          <option value="webp" selected>WebP — جودة عالية + حجم صغير (مُوصى به للنشر)</option>
+          <option value="png">PNG — بدون ضغط (حجم كبير)</option>
+          <option value="jpg">JPG — مع ضغط (حجم صغير)</option>
+        </select>
+
+        <div style="margin-top:10px;">
+          <label class="prop-label">الجودة <span id="export-quality-val">90</span>%</label>
+          <input type="range" id="export-quality" min="50" max="100" value="90" oninput="document.getElementById('export-quality-val').textContent=this.value">
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-header"><span class="panel-title">ضبط النص (احترافي)</span></div>
+        <label class="prop-label">مقياس حجم الخط <span id="export-font-scale-val">1.0</span>×</label>
+        <input type="range" id="export-font-scale" min="0.5" max="3" step="0.05" value="1.0" oninput="document.getElementById('export-font-scale-val').textContent=parseFloat(this.value).toFixed(2)">
+        <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">تكبير/تصغير حجم النص في الصور المصدرة فقط (لا يؤثر على المحرر)</div>
+
+        <label class="prop-label" style="margin-top:8px">فجوة السطور <span id="export-line-gap-val">2</span>px</label>
+        <input type="range" id="export-line-gap" min="0" max="20" value="2" oninput="document.getElementById('export-line-gap-val').textContent=this.value">
+
+        <div style="margin-top:8px;">
+          <label class="prop-label">لون الخلفية</label>
+          <div class="color-row">
+            <input type="color" id="export-bg-color" value="#ffffff">
+            <input type="text" id="export-bg-hex" value="#ffffff" onchange="document.getElementById('export-bg-color').value=this.value" class="color-hex">
+            <button class="action-btn" style="height:28px; font-size:11px; padding:0 8px;" onclick="document.getElementById('export-bg-color').value='#ffffff'; document.getElementById('export-bg-hex').value='#ffffff'">إعادة تعيين</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-header"><span class="panel-title">Stroke (التخطيط) — للتصدير</span></div>
+        <label class="prop-label" style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="export-force-stroke">
+          فرض Stroke على كل النصوص (إذا لم يكن مفعّلاً)
+        </label>
+        <div style="margin-top:6px;">
+          <label class="prop-label">السماكة الافتراضية <span id="export-stroke-w-val">1.5</span>px</label>
+          <input type="range" id="export-stroke-w" min="0.5" max="10" step="0.5" value="1.5" oninput="document.getElementById('export-stroke-w-val').textContent=this.value">
+        </div>
+        <div style="margin-top:6px;">
+          <label class="prop-label">لون Stroke</label>
+          <div class="color-row">
+            <input type="color" id="export-stroke-color" value="#ffffff">
+            <input type="text" id="export-stroke-hex" value="#ffffff" onchange="document.getElementById('export-stroke-color').value=this.value" class="color-hex">
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-header"><span class="panel-title">الدمج والتقطيع</span></div>
+        <label class="prop-label" style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="export-merge">
+          دمج كل الصفحات في شريط طويل (webtoon)
+        </label>
+        <div style="margin-top:8px;">
+          <label class="prop-label">الارتفاع الأقصى لكل صورة <span id="export-max-height-val">9000</span> بكسل</label>
+          <input type="range" id="export-max-height" min="1000" max="30000" step="500" value="9000" oninput="document.getElementById('export-max-height-val').textContent=this.value">
+          <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">إذا تجاوز المحتوى هذا الارتفاع، سيتم تقطيعه تلقائياً إلى صور متعددة</div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-header"><span class="panel-title">نطاق التصدير</span></div>
+        <label class="prop-label" style="display:flex; align-items:center; gap:6px;">
+          <input type="radio" name="export-range" value="all" checked onchange="toggleExportRange()">
+          كل الصفحات
+        </label>
+        <label class="prop-label" style="display:flex; align-items:center; gap:6px; margin-top:4px;">
+          <input type="radio" name="export-range" value="current" onchange="toggleExportRange()">
+          الصفحة الحالية فقط
+        </label>
+        <label class="prop-label" style="display:flex; align-items:center; gap:6px; margin-top:4px;">
+          <input type="radio" name="export-range" value="range" onchange="toggleExportRange()">
+          نطاق مخصص:
+        </label>
+        <div id="export-range-inputs" class="hidden" style="display:flex; gap:8px; margin-top:6px;">
+          <input type="number" id="export-range-from" min="1" value="1" style="flex:1; height:30px; padding:0 8px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px;">
+          <span style="color:var(--text-dim); line-height:30px;">إلى</span>
+          <input type="number" id="export-range-to" min="1" value="1" style="flex:1; height:30px; padding:0 8px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px;">
+        </div>
+      </div>
+
+      <div id="export-progress" class="hidden" style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--text-dim);"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn" onclick="hideExportModal()">إلغاء</button>
+      <button class="action-btn apply-all-btn" onclick="startExport()">تصدير</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== PROVIDER MODAL (بديل للـ API عبر الإنترنت) ===== -->
+<div id="provider-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideProviderModal()"></div>
+  <div class="modal-content" style="max-width:650px">
+    <div class="modal-header">
+      <h2>خدمات الترجمة عبر الإنترنت (API)</h2>
+      <button class="modal-close" onclick="hideProviderModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text-dim); margin-bottom:12px; font-size:12px;">
+        أضف مفاتيح API لاستخدام نماذج ترجمة قوية عبر الإنترنت بدلاً من النماذج المحلية.
+      </p>
+      <div id="providers-list"></div>
+      <div id="provider-custom-add" style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+        <div class="panel-header"><span class="panel-title">إضافة API مخصص (OpenAI-compatible)</span></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input type="text" id="custom-base-url" placeholder="https://api.example.com/v1" style="flex:2; height:32px; padding:0 8px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px;">
+          <input type="password" id="custom-api-key" placeholder="API Key" style="flex:1; height:32px; padding:0 8px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px;">
+          <button class="action-btn apply-all-btn" onclick="addCustomProvider()" style="white-space:nowrap; height:32px;">إضافة</button>
+        </div>
+      </div>
+      <div id="provider-status" class="hidden" style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--text-dim);"></div>
+    </div>
+    <div class="modal-footer">
+      <span style="font-size:11px; color:var(--accent); flex:1;" id="active-provider-label">غير محدد</span>
+      <button class="action-btn" onclick="hideProviderModal()">إغلاق</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== UPLOAD FONT MODAL ===== -->
+<div id="font-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideFontUpload()"></div>
+  <div class="modal-content" style="max-width:500px">
+    <div class="modal-header">
+      <h2>رفع خط جديد</h2>
+      <button class="modal-close" onclick="hideFontUpload()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text-dim); margin-bottom:12px;">اختر ملف خط (.ttf, .otf, .ttc)</p>
+      <input type="file" id="font-file-input" accept=".ttf,.otf,.ttc" onchange="uploadFont(this)">
+      <div id="font-upload-status" class="hidden" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TEXT EXPORT MODAL ===== -->
+<div id="text-export-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideTextExportModal()"></div>
+  <div class="modal-content" style="max-width:600px">
+    <div class="modal-header">
+      <h2>تصدير نص الفصل</h2>
+      <button class="modal-close" onclick="hideTextExportModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text-dim); margin-bottom:8px; font-size:12px;">انسخ النص أو حمّله كملف .txt (من GET .../text-export):</p>
+      <textarea id="text-export-content" rows="14" readonly style="width:100%; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px; resize:vertical; direction:ltr; text-align:left;"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn" onclick="hideTextExportModal()">إغلاق</button>
+      <button class="action-btn" onclick="copyExportedText()">نسخ</button>
+      <button class="action-btn apply-all-btn" onclick="downloadExportedText()">تحميل .txt</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TEXT IMPORT MODAL ===== -->
+<div id="text-import-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideTextImportModal()"></div>
+  <div class="modal-content" style="max-width:600px">
+    <div class="modal-header">
+      <h2>استيراد نص الفصل</h2>
+      <button class="modal-close" onclick="hideTextImportModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text-dim); margin-bottom:8px; font-size:12px;">الصق النص المُصدَّر ثم اضغط استيراد (POST .../text-import):</p>
+      <textarea id="text-import-content" rows="14" placeholder="الصق النص هنا..." style="width:100%; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px; resize:vertical; direction:ltr; text-align:left;"></textarea>
+      <label style="font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px; margin-top:8px;">
+        <input type="checkbox" id="text-import-overwrite">
+        استبدال الكل (overwrite) — بدون تحديد تُحدَّث المطابقات فقط
+      </label>
+      <div id="text-import-report" class="hidden" style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--text-dim); white-space:pre-wrap;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn" onclick="hideTextImportModal()">إلغاء</button>
+      <button class="action-btn apply-all-btn" onclick="submitTextImport()">استيراد</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SETTINGS MODAL ===== -->
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-backdrop" onclick="hideSettingsModal()"></div>
+  <div class="modal-content" style="max-width:520px">
+    <div class="modal-header">
+      <h2>الإعدادات</h2>
+      <button class="modal-close" onclick="hideSettingsModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="panel-section">
+        <div class="panel-header"><span class="panel-title">مجلد المانهوا الرئيسي</span></div>
+        <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">كل مانهوا تُحفظ في مجلد باسمها داخله، وفصولها تُضاف لنفس المجلد تلقائياً.</p>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="settings-output-dir" placeholder="C:\Manga" style="flex:1; height:34px; padding:0 10px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px; direction:ltr;">
+          <button class="action-btn apply-all-btn" onclick="saveSettings()">حفظ</button>
+        </div>
+        <div id="settings-status" style="margin-top:8px; font-size:12px; color:var(--text-dim);"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn" onclick="hideSettingsModal()">إغلاق</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

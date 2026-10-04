@@ -1,0 +1,1300 @@
+import json
+import zipfile
+import io
+import os
+import re
+import queue
+import shutil
+import time
+import threading
+import uuid
+from pathlib import Path
+from typing import Optional, Union, Any
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Request
+from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from .exporter import get_available_fonts, export_chapter, _parse_color
+from translator.providers import (
+    get_providers_public,
+    get_provider,
+    save_provider_config,
+    delete_provider,
+    test_connection,
+    fetch_models,
+    translate_texts,
+)
+
+app = FastAPI(title="Manga AI Editor", version="1.0.0")
+
+
+def _atomic_json_dump(path, payload):
+    """Write JSON atomically so interrupted writes don't corrupt the file."""
+    import os as _os
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.flush()
+        try:
+            _os.fsync(f.fileno())
+        except Exception:
+            pass
+    _os.replace(tmp, str(path))
+
+
+# Per-file locks so concurrent read-modify-write cycles don't race
+_file_locks: dict[str, threading.Lock] = {}
+_file_locks_lock = threading.Lock()
+
+
+def _get_file_lock(path):
+    str_path = str(path)
+    with _file_locks_lock:
+        if str_path not in _file_locks:
+            _file_locks[str_path] = threading.Lock()
+        return _file_locks[str_path]
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _file_transaction(path):
+    """Acquire per-file lock, read JSON, yield data, write back on success."""
+    lock = _get_file_lock(path)
+    lock.acquire()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        yield data
+        _atomic_json_dump(path, data)
+    finally:
+        lock.release()
+
+
+# ── Scrape task tracking (background) ──────────────────────
+scrape_tasks = {}  # task_id -> {"status","url","log","slug","chapter","error","done"}
+scrape_tasks_lock = threading.Lock()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+OUTPUT_DIR = Path(__file__).parent.parent / "output"
+FONTS_DIR = Path(__file__).parent.parent / "fonts"
+FONTS_USER_DIR = FONTS_DIR / "_user"
+APP_CONFIG_FILE = Path(__file__).parent.parent / "config.json"
+
+
+def _resolve_output_dir() -> Path:
+    """Base manga folder: env MANGA_OUTPUT_DIR > config.json > ./output.
+
+    Every manga gets its own subfolder by slug; chapters of the same
+    manga always land in that same folder.
+    """
+    env = (os.environ.get("MANGA_OUTPUT_DIR", "") or "").strip()
+    if env:
+        return Path(env)
+    try:
+        if APP_CONFIG_FILE.exists():
+            cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8"))
+            if cfg.get("output_dir"):
+                return Path(cfg["output_dir"])
+    except Exception:
+        pass
+    return Path(__file__).parent.parent / "output"
+
+
+OUTPUT_DIR = _resolve_output_dir()
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+FONTS_USER_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class OutputDirPayload(BaseModel):
+    output_dir: str
+
+
+@app.get("/api/settings")
+def get_settings():
+    return {"output_dir": str(OUTPUT_DIR)}
+
+
+@app.post("/api/settings/output-dir")
+def set_output_dir(payload: OutputDirPayload):
+    global OUTPUT_DIR
+    p = Path(payload.output_dir or "").expanduser()
+    if not str(p).strip():
+        raise HTTPException(400, "Empty output_dir")
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        test = p / ".write_test"
+        test.write_text("ok", encoding="utf-8")
+        test.unlink()
+    except Exception as e:
+        raise HTTPException(400, f"Folder not writable: {e}")
+    OUTPUT_DIR = p.resolve()
+    try:
+        cfg = {}
+        if APP_CONFIG_FILE.exists():
+            cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8"))
+        cfg["output_dir"] = str(OUTPUT_DIR)
+        APP_CONFIG_FILE.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return {"status": "ok", "output_dir": str(OUTPUT_DIR)}
+
+
+# ── Path protection ──────────────────────────────────────
+_SAFE_SLUG_RE = re.compile(r"^[a-z0-9-]+$")
+_CHAPTER_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+
+
+def _safe_slug(s: str) -> str:
+    """Allow only lowercase alphanumeric + hyphen slugs."""
+    if not s or not _SAFE_SLUG_RE.match(s):
+        raise HTTPException(400, f"Invalid slug: {s!r}")
+    return s
+
+
+def _chapter_dir(slug: str, chapter: str) -> Path:
+    """Validate slug/chapter and return resolved chapter dir inside OUTPUT_DIR."""
+    _safe_slug(slug)
+    if not chapter or not _CHAPTER_RE.match(str(chapter)):
+        raise HTTPException(400, f"Invalid chapter: {chapter!r}")
+    base = OUTPUT_DIR.resolve()
+    ch_dir = (base / slug / f"chapter_{chapter}").resolve()
+    try:
+        ch_dir.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "Invalid chapter path")
+    return ch_dir
+
+
+class TextUpdate(BaseModel):
+    arabic_text: Optional[str] = None
+    x: Optional[float] = None
+    y: Optional[float] = None
+    width: Optional[float] = None
+    height: Optional[float] = None
+    font_size_px: Optional[float] = None
+    style: Optional[dict] = None
+
+
+class BatchStyleUpdate(BaseModel):
+    style: dict
+    scope: str = "all"
+
+
+class ChapterSavePayload(BaseModel):
+    pages: list[dict]
+
+
+def _default_text_style(font_size: float = 45) -> dict:
+    return {
+        "font": "Hayah",
+        "font_size": int(font_size),
+        "line_height": 1.1,
+        "color": "#000000",
+        "stroke_color": "#ffffff",
+        "stroke_width": 1,
+        "stroke_enabled": True,
+        "align": "center",
+        "rotation": 0,
+    }
+
+
+def _normalize_text_obj(t: dict, page_num: Optional[int] = None) -> dict:
+    font_size = float(t.get("font_size_px", t.get("style", {}).get("font_size", 45)) or 45)
+    if font_size < 6:
+        font_size = 45
+
+    incoming_style = dict(t.get("style") or {})
+    if "stroke_color" not in incoming_style and t.get("stroke_color"):
+        incoming_style["stroke_color"] = t.get("stroke_color")
+    if "stroke_width" not in incoming_style and t.get("stroke_width") is not None:
+        incoming_style["stroke_width"] = t.get("stroke_width")
+    if "stroke_enabled" not in incoming_style and t.get("stroke_enabled") is not None:
+        incoming_style["stroke_enabled"] = t.get("stroke_enabled")
+    style = {**_default_text_style(font_size), **incoming_style}
+    if str(style.get("color", "")).startswith("rgb("):
+        c = _parse_color(style["color"])
+        style["color"] = f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}"
+    if str(style.get("stroke_color", "")).startswith("rgb("):
+        c = _parse_color(style["stroke_color"])
+        style["stroke_color"] = f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}"
+    if str(style.get("stroke_color", "")).startswith("#"):
+        style["stroke_color"] = str(style["stroke_color"]).lower()
+
+    stroke_enabled = style.get("stroke_enabled", True)
+    if isinstance(stroke_enabled, str):
+        stroke_enabled = stroke_enabled.lower() not in ("false", "0", "")
+    else:
+        stroke_enabled = bool(stroke_enabled)
+    style["stroke_enabled"] = stroke_enabled
+
+    stroke_width = float(style.get("stroke_width", 1) or 0)
+    if stroke_enabled and stroke_width <= 0:
+        stroke_width = 1
+    style["stroke_width"] = stroke_width
+
+    style["font_size"] = int(float(style.get("font_size", font_size) or font_size))
+    style["line_height"] = max(0.7, min(3.0, float(style.get("line_height", t.get("line_height", 1.1)) or 1.1)))
+
+    normalized = dict(t)
+    normalized["page"] = page_num if page_num is not None else t.get("page")
+    normalized["original_text"] = t.get("original_text", "") or ""
+    normalized["arabic_text"] = t.get("arabic_text", "") or ""
+    normalized["x"] = float(t.get("x", 0) or 0)
+    normalized["y"] = float(t.get("y", 0) or 0)
+    normalized["width"] = max(20.0, float(t.get("width", 200) or 200))
+    normalized["height"] = max(10.0, float(t.get("height", 60) or 60))
+    normalized["font_size_px"] = font_size
+    normalized["line_height"] = style["line_height"]
+    normalized["scale_factor"] = float(t.get("scale_factor", 1.0) or 1.0)
+    normalized["style"] = style
+    return normalized
+
+
+def _normalize_chapter_data(data: dict):
+    total_texts = 0
+    for page in data.get("pages", []):
+        page_num = page.get("page")
+        texts = page.get("texts", []) or []
+        page["texts"] = [_normalize_text_obj(t, page_num) for t in texts if t.get("id")]
+        total_texts += len(page["texts"])
+    data["total_texts"] = total_texts
+
+
+@app.get("/api/chapters")
+def list_chapters():
+    if not OUTPUT_DIR.exists():
+        return {"chapters": []}
+    chapters = []
+    for slug_dir in sorted(OUTPUT_DIR.iterdir()):
+        if slug_dir.is_dir():
+            for ch_dir in sorted(slug_dir.iterdir()):
+                if ch_dir.is_dir() and (ch_dir / "chapter_data.json").exists():
+                    with open(ch_dir / "chapter_data.json", "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    chapters.append({
+                        "slug": data.get("slug", slug_dir.name),
+                        "chapter": data.get("chapter", ch_dir.name),
+                        "title": data.get("title", ""),
+                        "path": str(ch_dir),
+                        "total_pages": data.get("total_images", 0),
+                        "total_texts": data.get("total_texts", 0),
+                    })
+    return {"chapters": chapters}
+
+
+@app.get("/api/chapter/{slug}/{chapter}")
+def get_chapter(slug: str, chapter: str):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    _normalize_chapter_data(data)
+    return data
+
+
+@app.get("/api/chapter/{slug}/{chapter}/page/{page_num}")
+def get_page_image(slug: str, chapter: str, page_num: int):
+    ch_dir = _chapter_dir(slug, chapter)
+    png_path = ch_dir / "pages" / f"page_{page_num:03d}.png"
+    if not png_path.exists():
+        raise HTTPException(404, f"Page {page_num} not found")
+    return FileResponse(str(png_path), media_type="image/png")
+
+
+@app.put("/api/chapter/{slug}/{chapter}/text/{text_id}")
+def update_text(slug: str, chapter: str, text_id: str, update: TextUpdate):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+
+    with _file_transaction(json_path) as data:
+        found = False
+        for page in data.get("pages", []):
+            for t in page.get("texts", []):
+                if t["id"] == text_id:
+                    if update.arabic_text is not None:
+                        t["arabic_text"] = update.arabic_text
+                    if update.x is not None:
+                        t["x"] = update.x
+                    if update.y is not None:
+                        t["y"] = update.y
+                    if update.width is not None:
+                        t["width"] = update.width
+                    if update.height is not None:
+                        t["height"] = update.height
+                    if update.font_size_px is not None:
+                        t["font_size_px"] = update.font_size_px
+                    if update.style is not None:
+                        t["style"] = {**t.get("style", {}), **update.style}
+                    found = True
+                    break
+            if found:
+                break
+
+        if not found:
+            raise HTTPException(404, f"Text {text_id} not found")
+
+        _normalize_chapter_data(data)
+
+    return {"status": "ok", "id": text_id}
+
+
+@app.put("/api/chapter/{slug}/{chapter}")
+def save_chapter(slug: str, chapter: str, payload: ChapterSavePayload):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+
+    with _file_transaction(json_path) as data:
+        old_pages = data.get("pages", [])
+        old_pages_by_num = {p.get("page"): p for p in old_pages}
+        new_pages = []
+
+        for incoming_page in payload.pages:
+            page_num = incoming_page.get("page")
+            old_page = old_pages_by_num.get(page_num, {})
+            fallback_filename = old_page.get("filename", "")
+            if not fallback_filename and isinstance(page_num, int):
+                fallback_filename = f"page_{page_num:03d}.png"
+            new_pages.append({
+                "page": page_num,
+                "filename": incoming_page.get("filename", fallback_filename),
+                "width": incoming_page.get("width", old_page.get("width", 0)),
+                "height": incoming_page.get("height", old_page.get("height", 0)),
+                "texts": [_normalize_text_obj(t, page_num) for t in (incoming_page.get("texts", []) or []) if t.get("id")],
+            })
+
+        data["pages"] = sorted(new_pages, key=lambda p: (p.get("page") is None, p.get("page", 0)))
+        data["slug"] = slug
+        data["chapter"] = chapter
+        data["total_images"] = len(new_pages)
+        _normalize_chapter_data(data)
+
+    return {"status": "ok", "saved_pages": len(payload.pages)}
+
+
+@app.delete("/api/chapter/{slug}/{chapter}/text/{text_id}")
+def delete_text(slug: str, chapter: str, text_id: str):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+
+    with _file_transaction(json_path) as data:
+        removed = False
+        for page in data.get("pages", []):
+            before = len(page.get("texts", []))
+            page["texts"] = [t for t in page.get("texts", []) if t.get("id") != text_id]
+            if len(page["texts"]) != before:
+                removed = True
+                break
+
+        if not removed:
+            raise HTTPException(404, f"Text {text_id} not found")
+
+        _normalize_chapter_data(data)
+
+    return {"status": "ok", "id": text_id}
+
+
+@app.put("/api/chapter/{slug}/{chapter}/batch-style")
+def batch_update_style(slug: str, chapter: str, update: BatchStyleUpdate,
+                       page: Optional[int] = Query(default=None, description="Apply to specific page only")):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+
+    with _file_transaction(json_path) as data:
+        modified = 0
+        pages_to_update = data.get("pages", [])
+        if page is not None:
+            pages_to_update = [p for p in pages_to_update if p.get("page") == page]
+
+        for page_data in pages_to_update:
+            for t in page_data.get("texts", []):
+                if "style" not in t:
+                    t["style"] = {}
+                t["style"] = {**t["style"], **update.style}
+                modified += 1
+
+        _normalize_chapter_data(data)
+
+    return {"status": "ok", "modified": modified}
+
+
+@app.post("/api/chapter/{slug}/{chapter}/export")
+def export_chapter_endpoint(
+    slug: str, chapter: str,
+    export_format: str = Query(default="webp", alias="format"),
+    export_quality: int = Query(default=90, alias="quality"),
+    export_merge: bool = Query(default=False, alias="merge"),
+    export_max_height: int = Query(default=9000, alias="max_height"),
+    export_pages: str = Query(default="", alias="pages"),
+    font_scale: float = Query(default=1.0, alias="font_scale"),
+    line_gap: int = Query(default=2, alias="line_gap"),
+    bg_color: str = Query(default="#ffffff", alias="bg_color"),
+    force_stroke: bool = Query(default=False, alias="force_stroke"),
+    export_stroke_w: float = Query(default=1.5, alias="export_stroke_w"),
+    export_stroke_color: str = Query(default="#ffffff", alias="export_stroke_color"),
+):
+    ch_dir = _chapter_dir(slug, chapter)
+    export_dir = ch_dir / "exported"
+    page_range = None
+    if export_pages:
+        try:
+            parts = [int(x.strip()) for x in export_pages.split(",") if x.strip()]
+            if parts:
+                page_range = parts
+        except ValueError:
+            pass
+    bg_rgb = _parse_color(bg_color)
+    stroke_rgb = _parse_color(export_stroke_color)
+    files = export_chapter(
+        ch_dir, export_dir,
+        fmt=export_format, quality=export_quality,
+        merge=export_merge, max_height=export_max_height,
+        page_range=page_range,
+        font_scale=font_scale,
+        line_gap=line_gap,
+        bg_color=bg_rgb,
+        force_stroke=force_stroke,
+        export_stroke_width=export_stroke_w,
+        export_stroke_color=stroke_rgb,
+    )
+    filenames = [Path(f).name for f in files]
+    return {"status": "ok", "exported": str(export_dir), "files": filenames}
+
+
+@app.get("/api/chapter/{slug}/{chapter}/exported/{filename}")
+def get_exported(slug: str, chapter: str, filename: str):
+    ch_dir = _chapter_dir(slug, chapter)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    file_path = (ch_dir / "exported" / filename).resolve()
+    try:
+        file_path.relative_to(ch_dir.resolve())
+    except ValueError:
+        raise HTTPException(400, "Invalid filename")
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+    ext = Path(filename).suffix.lower()
+    media_types = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
+    return FileResponse(str(file_path), media_type=media_types.get(ext, "image/png"))
+
+
+@app.get("/api/chapter/{slug}/{chapter}/download-zip")
+def download_zip(slug: str, chapter: str,
+                 dl_format: str = Query(default="webp", alias="format"),
+                 dl_quality: int = Query(default=90, alias="quality"),
+                 dl_merge: bool = Query(default=False, alias="merge"),
+                 dl_max_height: int = Query(default=9000, alias="max_height")):
+    ch_dir = _chapter_dir(slug, chapter)
+    export_dir = ch_dir / "exported"
+
+    if not export_dir.exists() or not list(export_dir.iterdir()):
+        export_chapter(ch_dir, export_dir, fmt=dl_format, quality=dl_quality, merge=dl_merge, max_height=dl_max_height)
+
+    buf = io.BytesIO()
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(export_dir.iterdir()):
+            if f.suffix.lower() in exts:
+                zf.write(f, arcname=f.name)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={slug}_chapter_{chapter}.zip"},
+    )
+
+
+@app.get("/api/fonts")
+def list_fonts():
+    fonts = get_available_fonts()
+    return {"fonts": fonts}
+
+
+@app.post("/api/fonts/upload")
+async def upload_font(file: UploadFile = File(...)):
+    FONTS_USER_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not file.filename:
+        raise HTTPException(400, "Filename is required")
+
+    safe_name = Path(file.filename).name
+    if not safe_name or safe_name in (".", ".."):
+        raise HTTPException(400, "Invalid filename")
+
+    ext = Path(safe_name).suffix.lower()
+    if ext not in (".ttf", ".otf", ".ttc"):
+        raise HTTPException(400, "Only .ttf, .otf, .ttc files allowed")
+
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Font file too large (max 5MB)")
+
+    base = FONTS_USER_DIR.resolve()
+    dest = (base / safe_name).resolve()
+    try:
+        dest.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "Invalid filename")
+    with open(dest, "wb") as f:
+        f.write(content)
+
+    return {"status": "ok", "font": safe_name, "path": str(dest)}
+
+
+# ── Server ───────────────────────────────────────────────
+
+@app.post("/api/shutdown")
+def shutdown_server(request: Request, token: Optional[str] = Query(default=None)):
+    expected = os.getenv("LOCAL_ADMIN_TOKEN", "")
+    provided = token or request.headers.get("x-admin-token") or request.headers.get("x-local-admin-token") or request.headers.get("token", "")
+    # Strip Bearer prefix if present
+    if provided and provided.lower().startswith("bearer "):
+        provided = provided[7:].strip()
+    if not expected:
+        client_host = request.client.host if request.client else ""
+        if client_host not in ("127.0.0.1", "::1"):
+            raise HTTPException(403, "Forbidden: shutdown allowed only from 127.0.0.1")
+    else:
+        if not provided or provided != expected:
+            raise HTTPException(403, "Forbidden: invalid admin token")
+    t = threading.Timer(0.5, os._exit, args=[0])
+    t.start()
+    return {"status": "shutting_down"}
+
+
+@app.post("/api/scrape")
+def scrape_new(url: str = Query(..., description="Chapter URL"),
+                headless: bool = Query(True, description="Run browser headless"),
+                browser: str = Query("brave", description="Browser to use: 'brave' or 'chrome'")):
+    """Start scraping in background. Returns task_id immediately."""
+    task_id = uuid.uuid4().hex
+    with scrape_tasks_lock:
+        scrape_tasks[task_id] = {
+            "status": "started",
+            "url": url,
+            "log": f"بدء التحميل في الخلفية (متصفح={browser}, headless={headless})...\n",
+            "slug": None,
+            "chapter": None,
+            "error": None,
+            "done": False,
+            "started_at": time.time(),
+        }
+        # keep only the last 50 tasks (drop oldest by started_at)
+        if len(scrape_tasks) > 50:
+            oldest = sorted(scrape_tasks.items(), key=lambda kv: kv[1].get("started_at", 0))
+            for tid, _ in oldest[:len(scrape_tasks) - 50]:
+                scrape_tasks.pop(tid, None)
+
+    def _run_scrape():
+        try:
+            from scraper.coordinator import scrape_chapter
+            print(f"[i] Scrape task {task_id[:8]} starting for {url} (browser={browser}, headless={headless})", flush=True)
+            ch_dir = scrape_chapter(url, headless=headless, browser=browser)
+            if ch_dir:
+                with scrape_tasks_lock:
+                    t = scrape_tasks[task_id]
+                    t["status"] = "ok"
+                    t["slug"] = ch_dir.parent.name
+                    t["chapter"] = ch_dir.name.replace("chapter_", "")
+                    t["log"] += "\n✓ تم التحميل بنجاح\n"
+            else:
+                with scrape_tasks_lock:
+                    t = scrape_tasks[task_id]
+                    t["status"] = "error"
+                    t["error"] = "فشل التحميل - لم يتم العثور على صور"
+                    t["log"] += "\n✗ لم يتم العثور على صور\n"
+        except Exception as e:
+            print(f"[!] Scrape task {task_id[:8]} error: {e}", flush=True)
+            with scrape_tasks_lock:
+                t = scrape_tasks[task_id]
+                t["status"] = "error"
+                t["error"] = f"خطأ: {str(e)}"
+                t["log"] += f"\n✗ خطأ: {str(e)}\n"
+        finally:
+            with scrape_tasks_lock:
+                scrape_tasks[task_id]["done"] = True
+
+    t = threading.Thread(target=_run_scrape, daemon=True)
+    t.start()
+    return {"status": "started", "task_id": task_id}
+
+
+@app.get("/api/scrape/task/{task_id}")
+def scrape_task_status(task_id: str):
+    with scrape_tasks_lock:
+        task = scrape_tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return task
+
+
+@app.get("/api/scrape/tasks")
+def list_scrape_tasks():
+    with scrape_tasks_lock:
+        return {"tasks": [
+            {"id": tid, "status": t["status"], "url": t["url"], "done": t["done"], "slug": t["slug"], "chapter": t["chapter"], "error": t["error"]}
+            for tid, t in scrape_tasks.items()
+        ]}
+
+
+# ════════════════════════════════════════════════════════════
+#  PROVIDERS MANAGEMENT
+# ════════════════════════════════════════════════════════════
+
+class ProviderUpdate(BaseModel):
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    default_model: Optional[str] = None
+    default_model_name: Optional[str] = None
+    enabled: Optional[bool] = None
+    models: Optional[list] = None
+
+
+@app.get("/api/providers")
+def list_providers():
+    return get_providers_public()
+
+
+@app.post("/api/providers/{provider_id}/save")
+def save_provider(provider_id: str, update: ProviderUpdate):
+    updates = {k: v for k, v in update.model_dump().items() if v is not None}
+    save_provider_config(provider_id, updates)
+    return {"status": "ok"}
+
+
+@app.post("/api/providers/{provider_id}/test")
+def provider_test(provider_id: str):
+    ok, msg = test_connection(provider_id)
+    return {"status": "ok" if ok else "error", "message": msg}
+
+
+@app.post("/api/providers/{provider_id}/fetch-models")
+def provider_fetch_models(provider_id: str):
+    models = fetch_models(provider_id)
+    if models is None:
+        return {"status": "error", "message": "فشل في جلب النماذج — تحقق من API key"}
+    return {"status": "ok", "models": models}
+
+
+@app.post("/api/providers/{provider_id}/delete")
+def provider_delete(provider_id: str):
+    delete_provider(provider_id)
+    return {"status": "ok"}
+
+
+@app.post("/api/chapter/{slug}/{chapter}/translate-with-provider")
+def translate_with_provider(
+    slug: str, chapter: str,
+    provider_id: str = Query(...),
+    model: str = Query(...),
+    clear: bool = Query(False, description="Clear existing translations before retranslate"),
+):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found")
+
+    # Phase 1: quick transaction — clear translations only
+    if clear:
+        with _file_transaction(json_path) as data:
+            print("[i] Clearing existing translations...")
+            for page in data.get("pages", []):
+                for t in page.get("texts", []):
+                    t["arabic_text"] = ""
+
+    # Phase 2: read data, collect texts needing translation by ID
+    with open(json_path, "r", encoding="utf-8") as f:
+        data_snap = json.load(f)
+
+    all_texts = []
+    text_ids = []
+    for page in data_snap.get("pages", []):
+        for t in page.get("texts", []):
+            if not t.get("arabic_text") and (t.get("original_text") or "").strip():
+                all_texts.append(t)
+                text_ids.append(t.get("id", ""))
+
+    if not all_texts:
+        return {"status": "ok", "translated": 0, "provider": provider_id, "model": model}
+
+    # Phase 3: translate outside any lock (can take minutes)
+    print(f"[->] Translating {len(all_texts)} texts via {provider_id}/{model}...")
+    result = translate_texts(all_texts, provider_id, model)
+
+    if result is None:
+        raise HTTPException(500, f"فشلت الترجمة عبر {provider_id}. تحقق من API key والموديل.")
+
+    # Build id -> arabic_text map from results
+    translated_map = {}
+    for i, t in enumerate(result):
+        tid = text_ids[i] if i < len(text_ids) else ""
+        arabic = t.get("arabic_text", "").strip()
+        if tid and arabic:
+            translated_map[tid] = arabic
+
+    # Phase 4: apply results by ID in a short transaction
+    with _file_transaction(json_path) as data:
+        for page in data.get("pages", []):
+            for t in page.get("texts", []):
+                tid = t.get("id", "")
+                if tid in translated_map and not t.get("arabic_text"):
+                    t["arabic_text"] = translated_map[tid]
+
+    total_ok = len(translated_map)
+    return {"status": "ok", "translated": total_ok, "provider": provider_id, "model": model}
+
+
+@app.delete("/api/chapter/{slug}/{chapter}")
+def delete_chapter(slug: str, chapter: str):
+    """Delete an entire chapter directory (images + data)."""
+    ch_dir = _chapter_dir(slug, chapter)
+    if not ch_dir.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    import shutil
+    shutil.rmtree(str(ch_dir), ignore_errors=True)
+    return {"status": "deleted", "slug": slug, "chapter": chapter}
+
+
+@app.post("/api/chapter/{slug}/{chapter}/reset")
+def reset_chapter(slug: str, chapter: str):
+    """Reset all arabic_text fields to empty string."""
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    with _file_transaction(json_path) as data:
+        count = 0
+        for page in data.get("pages", []):
+            for t in page.get("texts", []):
+                if t.get("arabic_text"):
+                    t["arabic_text"] = ""
+                    count += 1
+    return {"status": "reset", "slug": slug, "chapter": chapter, "cleared": count}
+
+
+class TextImportPayload(BaseModel):
+    content: Optional[str] = None
+    text: Optional[str] = None
+    overwrite: bool = False
+
+
+def _flat_text(s: str) -> str:
+    return (s or "").replace("\r\n", " ").replace("\n", " ").replace("\r", " ").strip()
+
+
+@app.get("/api/chapter/{slug}/{chapter}/text-export")
+def text_export(slug: str, chapter: str,
+                only_untranslated: bool = Query(default=False)):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    items = []
+    for page in data.get("pages", []):
+        for t in page.get("texts", []) or []:
+            if not t.get("id"):
+                continue
+            if not (t.get("original_text") or "").strip():
+                continue
+            if only_untranslated and (t.get("arabic_text") or "").strip():
+                continue
+            items.append(t)
+    lines = [f"MANGA-TEXT v1 slug={slug} chapter={chapter} count={len(items)}"]
+    for i, t in enumerate(items, 1):
+        tid = t.get("id", "")
+        page = t.get("page", "")
+        en = _flat_text(t.get("original_text", ""))
+        ar = _flat_text(t.get("arabic_text", ""))
+        lines.append(f"--- [{i:03d}] page={page} id={tid} ---")
+        lines.append(f"EN: {en}")
+        lines.append(f"AR: {ar}")
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; charset=utf-8")
+
+
+@app.post("/api/chapter/{slug}/{chapter}/text-import")
+def text_import(slug: str, chapter: str, payload: TextImportPayload):
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    content = payload.content or payload.text or ""
+    if len(content) > 500_000:
+        raise HTTPException(413, "Import content too large (max 500000 chars)")
+    lines = content.splitlines()
+    id_re = re.compile(r"id=(\S+)")
+    pairs: list[tuple[str, str]] = []
+    for idx, line in enumerate(lines):
+        m = id_re.search(line)
+        if not m:
+            continue
+        tid = m.group(1).rstrip("-").strip()
+        ar_text = ""
+        found_ar = False
+        for j in range(idx + 1, len(lines)):
+            nxt = lines[j].lstrip()
+            if id_re.search(lines[j]) and j > idx:
+                # next block started before AR line -> treat as empty
+                # (only break if this line looks like a block header)
+                if lines[j].strip().startswith("---"):
+                    break
+            if nxt.startswith("AR:"):
+                ar_text = lines[j].split("AR:", 1)[1].strip()
+                found_ar = True
+                break
+        pairs.append((tid, ar_text if found_ar else ""))
+    total = len(pairs)
+    # backup before write
+    try:
+        bak_path = Path(str(json_path) + ".bak")
+        shutil.copy2(str(json_path), str(bak_path))
+    except Exception:
+        pass
+    imported = 0
+    skipped_empty = 0
+    unknown_id = 0
+    skipped_existing = 0
+    with _file_transaction(json_path) as data:
+        id_map = {}
+        for page in data.get("pages", []):
+            for t in page.get("texts", []) or []:
+                if t.get("id"):
+                    id_map[t["id"]] = t
+        for tid, ar in pairs:
+            if not ar:
+                skipped_empty += 1
+                continue
+            obj = id_map.get(tid)
+            if obj is None:
+                unknown_id += 1
+                continue
+            if (obj.get("arabic_text") or "").strip() and not payload.overwrite:
+                skipped_existing += 1
+                continue
+            obj["arabic_text"] = ar
+            imported += 1
+    return {"status": "ok", "imported": imported, "updated": imported,
+            "skipped_empty": skipped_empty, "skipped": skipped_empty,
+            "unknown_id": unknown_id, "not_found": unknown_id,
+            "skipped_existing": skipped_existing, "total": total}
+
+
+# ── Batch scrape queue (in-memory + persist output/.queue.json) ──
+class BatchScrapePayload(BaseModel):
+    start_url: Optional[str] = None
+    urls: Optional[list[str]] = None
+    count: Optional[int] = None
+    headless: bool = True
+    browser: str = "brave"
+    auto_translate: Optional[Union[bool, dict]] = None
+    provider_id: Optional[str] = None
+    model: Optional[str] = None
+    auto_export: Optional[dict] = None
+    delay_sec: float = 0
+
+
+def _normalize_auto_translate(auto_translate: Optional[Union[bool, dict]],
+                              provider_id: Optional[str],
+                              model: Optional[str]) -> Optional[dict]:
+    """Accept auto_translate as bool|dict|None + root provider_id/model fallback."""
+    if auto_translate is True:
+        # True means use root provider_id/model
+        if provider_id and model:
+            return {"provider_id": provider_id, "model": model}
+        return None
+    if auto_translate is False:
+        return None
+    if isinstance(auto_translate, dict):
+        # fill missing keys from root fields
+        pid = auto_translate.get("provider_id") or provider_id
+        mdl = auto_translate.get("model") or model
+        if (not auto_translate.get("provider_id") or not auto_translate.get("model")) and pid and mdl:
+            merged = dict(auto_translate)
+            merged["provider_id"] = pid
+            merged["model"] = mdl
+            return merged
+        return auto_translate
+    # None: accept root provider_id/model as alternative (auto-enable)
+    if auto_translate is None and provider_id and model:
+        return {"provider_id": provider_id, "model": model}
+    return auto_translate
+
+
+batch_jobs: dict[str, dict] = {}
+batches: dict[str, dict] = {}
+batch_lock = threading.Lock()
+_batch_queue: queue.Queue = queue.Queue()
+QUEUE_FILE = OUTPUT_DIR / ".queue.json"
+
+
+def _save_queue():
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        with batch_lock:
+            payload = {"batches": batches, "jobs": batch_jobs}
+        _atomic_json_dump(QUEUE_FILE, payload)
+    except Exception:
+        pass
+
+
+def _load_queue():
+    try:
+        if QUEUE_FILE.exists():
+            with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            with batch_lock:
+                for bid, b in (saved.get("batches") or {}).items():
+                    batches[bid] = b
+                for jid, j in (saved.get("jobs") or {}).items():
+                    if j.get("status") in ("scraping", "translating"):
+                        j["status"] = "failed"
+                        j["error"] = "interrupted by restart"
+                    batch_jobs[jid] = j
+    except Exception:
+        pass
+
+
+_CHAPTER_URL_RE = re.compile(r"/manga/([^/]+)/chapter-([0-9]+(?:\.[0-9]+)?)")
+
+
+def _expand_batch_urls(start_url: Optional[str], urls: Optional[list[str]],
+                       count: Optional[int]) -> list[str]:
+    if urls:
+        cleaned = [u.strip() for u in urls if u and u.strip()]
+        if not cleaned:
+            raise HTTPException(400, "urls is empty")
+        # count + urls: if count > len(urls) and start_url present, generate the rest;
+        # if no start_url, ignore count.
+        if count and count > len(cleaned) and start_url and start_url.strip():
+            need = count - len(cleaned)
+            # Try to continue the sequence from the last URL
+            base_url = cleaned[-1]
+            m = _CHAPTER_URL_RE.search(base_url)
+            if m is None:
+                m = _CHAPTER_URL_RE.search(start_url.strip())
+                base_url = start_url.strip()
+            if m is not None:
+                prefix_start, prefix_end = m.span(2)
+                # rebuild prefix/suffix relative to base_url
+                prefix = base_url[:prefix_start]
+                suffix = base_url[prefix_end:]
+                chapter_str = m.group(2)
+                try:
+                    start_num = float(chapter_str)
+                except ValueError:
+                    return cleaned
+                is_int = "." not in chapter_str
+                for i in range(1, need + 1):
+                    n = (int(start_num) + i) if is_int else (start_num + i)
+                    num_s = str(int(n)) if is_int else ("%g" % n)
+                    nxt = f"{prefix}{num_s}{suffix}"
+                    if nxt not in cleaned:
+                        cleaned.append(nxt)
+                    if len(cleaned) >= count:
+                        break
+        return cleaned
+    if not start_url or not start_url.strip():
+        raise HTTPException(400, "Provide start_url or urls")
+    start_url = start_url.strip()
+    if not count or count <= 1:
+        return [start_url]
+    m = _CHAPTER_URL_RE.search(start_url)
+    if not m:
+        raise HTTPException(400, "Cannot expand count: start_url has no /manga/{slug}/chapter-{N} pattern")
+    prefix_start, prefix_end = m.span(2)
+    prefix = start_url[:prefix_start]
+    suffix = start_url[prefix_end:]
+    chapter_str = m.group(2)
+    try:
+        start_num = float(chapter_str)
+    except ValueError:
+        raise HTTPException(400, "Invalid chapter number in start_url")
+    is_int = "." not in chapter_str
+    out = []
+    base_int = int(start_num) if is_int else start_num
+    for i in range(count):
+        n = base_int + i if is_int else start_num + i
+        if is_int:
+            num_s = str(int(n))
+        else:
+            num_s = ("%g" % n)
+        out.append(f"{prefix}{num_s}{suffix}")
+    return out
+
+
+def _batch_worker():
+    while True:
+        job_id = _batch_queue.get()
+        try:
+            with batch_lock:
+                job = batch_jobs.get(job_id)
+            if not job:
+                continue
+            with batch_lock:
+                if job.get("status") == "cancelled":
+                    continue
+                job["status"] = "scraping"
+                job["progress"] = 5
+                job["log"] = (job.get("log") or "") + "بدء السكراب...\n"
+            _save_queue()
+            # --- phase 1: scrape ---
+            try:
+                from scraper.coordinator import scrape_chapter
+                ch_dir = scrape_chapter(job["url"], headless=job.get("headless", True),
+                                        browser=job.get("browser", "brave"))
+            except Exception as e:
+                with batch_lock:
+                    if batch_jobs.get(job_id, {}).get("cancel_requested"):
+                        batch_jobs[job_id]["status"] = "cancelled"
+                    else:
+                        batch_jobs[job_id]["status"] = "failed"
+                        batch_jobs[job_id]["error"] = str(e)
+                        batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + f"✗ scrape error: {e}\n"
+                _save_queue()
+                continue
+            if not ch_dir:
+                with batch_lock:
+                    batch_jobs[job_id]["status"] = "failed"
+                    batch_jobs[job_id]["error"] = "scrape returned no images"
+                _save_queue()
+                continue
+            ch_dir = Path(ch_dir)
+            slug = ch_dir.parent.name
+            ch = ch_dir.name.replace("chapter_", "")
+            with batch_lock:
+                if batch_jobs.get(job_id, {}).get("cancel_requested"):
+                    batch_jobs[job_id]["status"] = "cancelled"
+                    _save_queue()
+                    continue
+                batch_jobs[job_id]["slug"] = slug
+                batch_jobs[job_id]["chapter"] = ch
+                batch_jobs[job_id]["progress"] = 40
+                batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "✓ تم السكراب\n"
+            _save_queue()
+            # --- phase 2: optional translate ---
+            auto_tr = job.get("auto_translate")
+            if auto_tr:
+                with batch_lock:
+                    if batch_jobs.get(job_id, {}).get("cancel_requested"):
+                        batch_jobs[job_id]["status"] = "cancelled"
+                        _save_queue()
+                        continue
+                    batch_jobs[job_id]["status"] = "translating"
+                    batch_jobs[job_id]["progress"] = 55
+                _save_queue()
+                try:
+                    provider_id = auto_tr.get("provider_id")
+                    model = auto_tr.get("model")
+                    if not provider_id or not model:
+                        raise ValueError("auto_translate requires provider_id and model")
+                    json_path = ch_dir / "chapter_data.json"
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        snap = json.load(f)
+                    need, ids = [], []
+                    for page in snap.get("pages", []):
+                        for t in page.get("texts", []) or []:
+                            if not t.get("arabic_text") and (t.get("original_text") or "").strip():
+                                need.append(t)
+                                ids.append(t.get("id", ""))
+                    if need:
+                        res = translate_texts(need, provider_id, model)
+                        if res is None:
+                            raise RuntimeError(f"translate via {provider_id} failed")
+                        tmap = {}
+                        for k, t in enumerate(res):
+                            tid = ids[k] if k < len(ids) else ""
+                            ar = (t.get("arabic_text") or "").strip()
+                            if tid and ar:
+                                tmap[tid] = ar
+                        with _file_transaction(json_path) as data:
+                            for page in data.get("pages", []):
+                                for t in page.get("texts", []) or []:
+                                    if t.get("id") in tmap and not t.get("arabic_text"):
+                                        t["arabic_text"] = tmap[t["id"]]
+                    with batch_lock:
+                        batch_jobs[job_id]["progress"] = 75
+                        batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "✓ تمت الترجمة\n"
+                    _save_queue()
+                except Exception as e:
+                    with batch_lock:
+                        batch_jobs[job_id]["status"] = "failed"
+                        batch_jobs[job_id]["error"] = f"translate error: {e}"
+                        batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + f"✗ translate error: {e}\n"
+                    _save_queue()
+                    continue
+            with batch_lock:
+                if batch_jobs.get(job_id, {}).get("cancel_requested"):
+                    batch_jobs[job_id]["status"] = "cancelled"
+                    _save_queue()
+                    continue
+            # --- phase 3: optional export ---
+            auto_ex = job.get("auto_export")
+            if auto_ex:
+                try:
+                    ex_fmt = auto_ex.get("format", auto_ex.get("fmt", "webp"))
+                    ex_quality = int(auto_ex.get("quality", 90))
+                    ex_merge = bool(auto_ex.get("merge", False))
+                    ex_max_h = int(auto_ex.get("max_height", auto_ex.get("maxHeight", 9000)))
+                    export_dir = ch_dir / "exported"
+                    export_chapter(ch_dir, export_dir, fmt=ex_fmt, quality=ex_quality,
+                                   merge=ex_merge, max_height=ex_max_h)
+                    with batch_lock:
+                        batch_jobs[job_id]["status"] = "exported"
+                        batch_jobs[job_id]["progress"] = 100
+                        batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "✓ تم التصدير\n"
+                    _save_queue()
+                except Exception as e:
+                    with batch_lock:
+                        batch_jobs[job_id]["status"] = "failed"
+                        batch_jobs[job_id]["error"] = f"export error: {e}"
+                    _save_queue()
+                    continue
+            else:
+                with batch_lock:
+                    # keep translating status only if translation ran; else review
+                    batch_jobs[job_id]["status"] = "review"
+                    batch_jobs[job_id]["progress"] = 100
+                    batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "بانتظار المراجعة\n"
+                _save_queue()
+            delay = float(job.get("delay_sec") or 0)
+            if delay > 0:
+                time.sleep(delay)
+        finally:
+            try:
+                _batch_queue.task_done()
+            except Exception:
+                pass
+
+
+_load_queue()
+_thread_batch = threading.Thread(target=_batch_worker, daemon=True)
+_thread_batch.start()
+
+
+@app.post("/api/batch-scrape")
+def batch_scrape(payload: BatchScrapePayload):
+    url_list = _expand_batch_urls(payload.start_url, payload.urls, payload.count)
+    auto_tr_norm = _normalize_auto_translate(payload.auto_translate, payload.provider_id, payload.model)
+    batch_id = uuid.uuid4().hex
+    job_ids = []
+    with batch_lock:
+        batches[batch_id] = {"batch_id": batch_id, "total": len(url_list),
+                             "job_ids": [], "created_at": time.time()}
+    for u in url_list:
+        jid = uuid.uuid4().hex
+        job_ids.append(jid)
+        with batch_lock:
+            batch_jobs[jid] = {
+                "id": jid, "job_id": jid, "batch_id": batch_id, "url": u,
+                "status": "queued", "progress": 0, "log": "",
+                "slug": None, "chapter": None, "error": None,
+                "headless": payload.headless, "browser": payload.browser,
+                "auto_translate": auto_tr_norm, "auto_export": payload.auto_export,
+                "delay_sec": payload.delay_sec, "created_at": time.time(),
+            }
+            batches[batch_id]["job_ids"].append(jid)
+        _batch_queue.put(jid)
+    _save_queue()
+    return {"batch_id": batch_id, "total": len(url_list), "job_ids": job_ids}
+
+
+@app.get("/api/batch/{batch_id}")
+def get_batch(batch_id: str):
+    with batch_lock:
+        b = batches.get(batch_id)
+        if not b:
+            raise HTTPException(404, "Batch not found")
+        jobs = [batch_jobs[jid] for jid in b.get("job_ids", []) if jid in batch_jobs]
+        counts: dict[str, int] = {}
+        for j in jobs:
+            counts[j.get("status", "queued")] = counts.get(j.get("status", "queued"), 0) + 1
+        total = b.get("total", len(jobs))
+        terminal = ("review", "exported", "failed", "cancelled")
+        done_count = sum(1 for j in jobs if j.get("status") in terminal)
+        done = (total > 0 and done_count == total)
+        completed = sum(1 for j in jobs if j.get("status") in ("review", "exported"))
+        progress = round(done_count / total * 100, 1) if total else 0
+        results = [{"job_id": j.get("job_id", j.get("id")), "slug": j.get("slug"),
+                    "chapter": j.get("chapter"), "status": j.get("status")} for j in jobs]
+        return {"batch_id": batch_id, "total": total,
+                "job_ids": b.get("job_ids", []), "status_counts": counts, "jobs": jobs,
+                "done": done, "completed": completed, "finished": done,
+                "status": "completed" if done else "running",
+                "progress": progress, "results": results}
+
+
+@app.get("/api/queue")
+def get_queue():
+    with batch_lock:
+        jobs = list(batch_jobs.values())
+        counts: dict[str, int] = {}
+        for j in jobs:
+            counts[j.get("status", "queued")] = counts.get(j.get("status", "queued"), 0) + 1
+        return {"total": len(jobs), "status_counts": counts,
+                "jobs": jobs, "batches": list(batches.values())}
+
+
+@app.post("/api/queue/cancel/{job_id}")
+def cancel_queue_job(job_id: str):
+    with batch_lock:
+        job = batch_jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        job["cancel_requested"] = True
+        if job.get("status") == "queued":
+            job["status"] = "cancelled"
+    _save_queue()
+    return {"status": "cancelled", "job_id": job_id}
+
+
+@app.post("/api/batch/{batch_id}/retry-failed")
+def retry_failed(batch_id: str):
+    with batch_lock:
+        b = batches.get(batch_id)
+        if not b:
+            raise HTTPException(404, "Batch not found")
+        retried = []
+        for jid in b.get("job_ids", []):
+            j = batch_jobs.get(jid)
+            if j and j.get("status") == "failed":
+                j["status"] = "queued"
+                j["error"] = None
+                j["progress"] = 0
+                j.pop("cancel_requested", None)
+                retried.append(jid)
+    for jid in retried:
+        _batch_queue.put(jid)
+    _save_queue()
+    return {"status": "ok", "retried": len(retried), "job_ids": retried}
+
+
+# Serve fonts for web (@font-face in browser)
+fonts_static = FONTS_DIR
+if fonts_static.exists():
+    app.mount("/fonts", StaticFiles(directory=str(fonts_static)), name="fonts")
+
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
