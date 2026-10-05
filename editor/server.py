@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from .exporter import get_available_fonts, export_chapter, _parse_color
+from .exporter import get_available_fonts, export_chapter, _parse_color, autofit_chapter_boxes
 from translator.providers import (
     get_providers_public,
     get_provider,
@@ -933,6 +933,39 @@ def reset_chapter(slug: str, chapter: str):
     return {"status": "reset", "slug": slug, "chapter": chapter, "cleared": count}
 
 
+class SmartFitPayload(BaseModel):
+    grow_boxes: bool = True
+    unify_stroke: bool = False
+    stroke_width: float = 1.5
+    stroke_color: str = "#ffffff"
+
+
+@app.post("/api/chapter/{slug}/{chapter}/smart-fit")
+def smart_fit_chapter(slug: str, chapter: str, payload: SmartFitPayload):
+    """Server-side smart fit (same function the auto worker uses).
+
+    Grows boxes downward so translated text fits at site size, then fits
+    fonts (shrink last resort). Optional stroke unification. Returns counts.
+    """
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    with _file_transaction(json_path) as data:
+        if payload.unify_stroke:
+            for page in data.get("pages", []):
+                for t in page.get("texts", []) or []:
+                    st = t.get("style") or {}
+                    if not st.get("stroke_enabled"):
+                        st["stroke_enabled"] = True
+                        st["stroke_width"] = payload.stroke_width
+                        st["stroke_color"] = payload.stroke_color
+                    t["style"] = st
+        stats = autofit_chapter_boxes(
+            data, max_grow=2.0 if payload.grow_boxes else 1.0)
+    return {"status": "ok", "slug": slug, "chapter": chapter, **stats}
+
+
 class TextImportPayload(BaseModel):
     content: Optional[str] = None
     text: Optional[str] = None
@@ -1277,6 +1310,29 @@ def _batch_worker():
                                 for t in page.get("texts", []) or []:
                                     if t.get("id") in tmap and not t.get("arabic_text"):
                                         t["arabic_text"] = tmap[t["id"]]
+                    # --- phase 2b: smart fit + stroke unify (same as manual) ---
+                    _at = job.get("auto_translate") or {}
+                    try:
+                        with _file_transaction(json_path) as data:
+                            if _at.get("unify_stroke"):
+                                for page in data.get("pages", []):
+                                    for t in page.get("texts", []) or []:
+                                        st = t.get("style") or {}
+                                        if not st.get("stroke_enabled"):
+                                            st["stroke_enabled"] = True
+                                            st["stroke_width"] = 1.5
+                                            st["stroke_color"] = "#ffffff"
+                                        t["style"] = st
+                            fit_stats = {"grown": 0, "shrunk": 0}
+                            if _at.get("smart_font", True):
+                                fit_stats = autofit_chapter_boxes(data)
+                        with batch_lock:
+                            batch_jobs[job_id]["log"] = (
+                                batch_jobs[job_id].get("log") or "") + (
+                                f"✓ ضبط ذكي (صناديق {fit_stats.get('grown', 0)}، "
+                                f"خط {fit_stats.get('shrunk', 0)})\n")
+                    except Exception as e:
+                        print(f"   [!] auto smart-fit skipped: {e}")
                     with batch_lock:
                         batch_jobs[job_id]["progress"] = 75
                         batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "✓ تمت الترجمة\n"

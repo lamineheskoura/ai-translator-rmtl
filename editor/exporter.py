@@ -127,6 +127,187 @@ def _pick_font_path(font_name: str, text: str) -> Optional[str]:
     return find_font_path(font_name)
 
 
+def _wrap_lines(draw, text: str, font, max_w: float) -> list[str]:
+    """Word-wrap (Arabic-aware) to max_w. Returns display-ready lines."""
+    raw_lines = (text or "").split("\n")
+    wrapped = []
+    for raw_line in raw_lines:
+        if not raw_line.strip():
+            wrapped.append("")
+            continue
+        _lat = 1.0 if _has_arabic(raw_line) else LATIN_WIDTH_FACTOR
+        reshaped_words = _reshape_arabic_no_bidi(raw_line).split()
+        current_words = []
+        for w in reshaped_words:
+            test_words = current_words + [w]
+            test = " ".join(test_words)
+            try:
+                tb = draw.textbbox((0, 0), test, font=font)
+                tw = (tb[2] - tb[0]) * _lat
+            except Exception:
+                tw = 0
+            if tw > max_w and current_words:
+                line_text = " ".join(current_words)
+                if _HAS_ARABIC_SHAPING:
+                    try:
+                        line_text = bidi_display(line_text)
+                    except Exception:
+                        pass
+                wrapped.append(line_text)
+                current_words = [w]
+            else:
+                current_words = test_words
+        if current_words:
+            line_text = " ".join(current_words)
+            if _HAS_ARABIC_SHAPING:
+                try:
+                    line_text = bidi_display(line_text)
+                except Exception:
+                    pass
+            wrapped.append(line_text)
+    return wrapped or [""]
+
+
+def _measure_block(draw, wrapped: list[str], font, line_height_factor: float,
+                   line_gap: int, fallback_size: int):
+    """Measure wrapped lines. Returns (line_widths, total_h)."""
+    line_widths = []
+    line_heights = []
+    max_line_h = 0
+    for line in wrapped:
+        if not line:
+            line_heights.append(0)
+            line_widths.append(0)
+            continue
+        try:
+            tb = draw.textbbox((0, 0), line, font=font)
+            lw = (tb[2] - tb[0]) * (1.0 if _has_arabic(line) else LATIN_WIDTH_FACTOR)
+            lh = tb[3] - tb[1]
+        except Exception:
+            lw = 0
+            lh = fallback_size
+        line_widths.append(lw)
+        line_heights.append(lh)
+        max_line_h = max(max_line_h, lh)
+    base_line_h = max(max_line_h, int(round(font.size * line_height_factor)), 1)
+    total_text_h = (base_line_h * len(wrapped)) + (max(len(wrapped) - 1, 0) * line_gap)
+    return line_widths, line_heights, base_line_h, total_text_h
+
+
+def measure_fitted(draw, text: str, font_path: str, start_size: int,
+                   max_w: float, max_h: float, line_height_factor: float = 1.2,
+                   line_gap: int = 2, measure_stroke: float = 0.0,
+                   min_size: int = 8) -> tuple:
+    """Shared fitter used by render AND box-autofit (single truth).
+
+    Starts at start_size; EN-only text never goes below start_size
+    (site proves it fits); translated text shrinks to min_size if needed.
+    Returns (fitted_size, font_or_None, wrapped, line_widths, total_h).
+    """
+    floor = start_size if not _has_arabic(text) else min_size
+    fitted = max(start_size, min_size)
+    font = None
+    wrapped, line_widths, line_heights, base_lh, total_h = [""], [0], [0], 0, 0
+    while True:
+        try:
+            font = ImageFont.truetype(font_path, fitted)
+        except Exception:
+            font = None
+            break
+        wrapped = _wrap_lines(draw, text, font, max_w)
+        line_widths, line_heights, base_lh, total_h = _measure_block(
+            draw, wrapped, font, line_height_factor, line_gap, fitted)
+        widest = max(line_widths) if line_widths else 0
+        if total_h <= max_h and widest + 2 * measure_stroke <= max_w:
+            break
+        if fitted <= floor:
+            break
+        fitted -= 1
+    return fitted, font, wrapped, line_widths, line_heights, base_lh, total_h
+
+
+def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
+                          margin: float = 6.0, line_gap: int = 2) -> dict:
+    """Grow boxes (down only) so translated text fits at site size.
+
+    For each text with arabic_text: if it overflows at site size, extend
+    the box downward (capped by page bottom, next box top, max_grow×).
+    Then fit the font (recorded into style) — shrink only as last resort.
+    Mutates chapter_data in place. Returns counts dict.
+    """
+    grown = shrunk = kept = skipped = 0
+    work = Image.new("RGB", (8, 8), (255, 255, 255))
+    draw = ImageDraw.Draw(work)
+    for page in chapter_data.get("pages", []):
+        try:
+            page_w = float(page.get("width", 0) or 0)
+            page_h = float(page.get("height", 0) or 0)
+        except Exception:
+            continue
+        texts = sorted((page.get("texts", []) or []),
+                       key=lambda t: float(t.get("y", 0) or 0))
+        for idx, t in enumerate(texts):
+            arabic = (t.get("arabic_text") or "").strip()
+            if not arabic:
+                skipped += 1
+                continue
+            try:
+                x = float(t.get("x", 0) or 0)
+                y = float(t.get("y", 0) or 0)
+                w = max(20.0, float(t.get("width", 200) or 200))
+                h = max(10.0, float(t.get("height", 60) or 60))
+                style = t.get("style", {}) or {}
+                site_size = max(8, int(round(float(
+                    style.get("font_size", t.get("font_size_px", 45))))))
+                lh = float(style.get("line_height", t.get("line_height", 1.2)) or 1.2)
+                font_name = style.get("font", "Hayah")
+            except Exception:
+                skipped += 1
+                continue
+            font_path = _pick_font_path(font_name, arabic)
+            if not font_path:
+                skipped += 1
+                continue
+            pad_x = min(6.0, max(2.0, w * 0.02))
+            pad_y = min(6.0, max(2.0, h * 0.10))
+            max_w, max_h = max(1, w - pad_x * 2), max(1, h - pad_y * 2)
+            fitted, _, _, _, _, _, _ = measure_fitted(
+                draw, arabic, font_path, site_size, max_w, max_h, lh, line_gap)
+            if fitted >= site_size:
+                kept += 1
+                continue
+            # Grow the box downward before touching the font size.
+            next_top = page_h
+            for other in texts[idx + 1:]:
+                try:
+                    oy = float(other.get("y", 0) or 0)
+                    ox = float(other.get("x", 0) or 0)
+                    ow = max(20.0, float(other.get("width", 200) or 200))
+                except Exception:
+                    continue
+                if oy > y and ox < x + w and x < ox + ow:
+                    next_top = min(next_top, oy)
+                    break
+            cap_h = min(page_h - y - 4, next_top - y - margin, h * max_grow)
+            if cap_h > h:
+                h = cap_h
+                t["height"] = round(h, 2)
+                pad_y = min(6.0, max(2.0, h * 0.10))
+                max_h = max(1, h - pad_y * 2)
+                grown += 1
+                fitted, _, _, _, _, _, _ = measure_fitted(
+                    draw, arabic, font_path, site_size, max_w, max_h, lh, line_gap)
+            if fitted < site_size:
+                shrunk += 1
+            else:
+                kept += 1
+            style["font_size"] = int(fitted)
+            t["font_size_px"] = float(fitted)
+            t["style"] = style
+    return {"grown": grown, "shrunk": shrunk, "kept": kept, "skipped": skipped}
+
+
+
 def _log(msg: str) -> None:
     """Console log immune to cp1252 consoles (Arabic text safe)."""
     try:
@@ -218,93 +399,11 @@ def _render_page(background: Image.Image, texts: list[dict],
         except Exception:
             _mstroke = 0.0
 
-        def _wrap_and_measure(cur_font):
-            raw_lines = arabic.split("\n")
-            wrapped = []
-            for raw_line in raw_lines:
-                if not raw_line.strip():
-                    wrapped.append("")
-                    continue
-                _lat_factor = 1.0 if _has_arabic(raw_line) else LATIN_WIDTH_FACTOR
-                reshaped_words = _reshape_arabic_no_bidi(raw_line).split()
-                current_words = []
-                for w in reshaped_words:
-                    test_words = current_words + [w]
-                    test = " ".join(test_words)
-                    try:
-                        tb = draw.textbbox((0, 0), test, font=cur_font)
-                        tw = (tb[2] - tb[0]) * _lat_factor
-                    except Exception:
-                        tw = 0
-                    if tw > max_w and current_words:
-                        line_text = " ".join(current_words)
-                        if _HAS_ARABIC_SHAPING:
-                            try:
-                                line_text = bidi_display(line_text)
-                            except Exception:
-                                pass
-                        wrapped.append(line_text)
-                        current_words = [w]
-                    else:
-                        current_words = test_words
-                if current_words:
-                    line_text = " ".join(current_words)
-                    if _HAS_ARABIC_SHAPING:
-                        try:
-                            line_text = bidi_display(line_text)
-                        except Exception:
-                            pass
-                    wrapped.append(line_text)
-            if not wrapped:
-                wrapped = [""]
-
-            line_heights = []
-            line_widths = []
-            max_line_h = 0
-            for line in wrapped:
-                if not line:
-                    line_heights.append(0)
-                    line_widths.append(0)
-                    continue
-                try:
-                    tb = draw.textbbox((0, 0), line, font=cur_font)
-                    lw = (tb[2] - tb[0]) * (1.0 if _has_arabic(line) else LATIN_WIDTH_FACTOR)
-                    lh = tb[3] - tb[1]
-                except Exception:
-                    lw = 0
-                    lh = font_size
-                line_widths.append(lw)
-                line_heights.append(lh)
-                max_line_h = max(max_line_h, lh)
-
-            base_line_h = max(max_line_h, int(round(cur_font.size * line_height_factor)), 1)
-            total_text_h = (base_line_h * len(wrapped)) + (max(len(wrapped) - 1, 0) * line_gap)
-            return wrapped, line_widths, line_heights, base_line_h, total_text_h
-
-        # Site-faithful sizing: start from the site/editor font size and
-        # shrink ONLY until the text fits the box (padding first, never the
-        # opposite). Two guarantees: (1) untranslated (Latin-only) text is
-        # NEVER shrunk below site size — the site itself proves it fits;
-        # (2) the floor is 8 only for translated text that truly overflows.
-        requested = max(8, int(round(font_size * FONT_SCALE * font_scale)))
-        min_size = requested if not _has_arabic(arabic) else 8
-        font = None
-        wrapped, line_widths, line_heights, base_line_h, total_text_h = [], [], [], 0, 0
-        fitted_font_size = requested
-        while True:
-            try:
-                font = ImageFont.truetype(font_path, fitted_font_size)
-            except Exception:
-                font = None
-                break
-            wrapped, line_widths, line_heights, base_line_h, total_text_h = _wrap_and_measure(font)
-            widest = max(line_widths) if line_widths else 0
-            if (total_text_h <= max_h
-                    and widest + 2 * _mstroke <= max_w):
-                break
-            if fitted_font_size <= min_size:
-                break
-            fitted_font_size -= 1
+        # Single shared truth with box-autofit: fit via measure_fitted.
+        (fitted_font_size, font, wrapped, line_widths,
+         line_heights, base_line_h, total_text_h) = measure_fitted(
+            draw, arabic, font_path, requested, max_w, max_h,
+            line_height_factor, line_gap, _mstroke)
         if fitted_font_size < requested:
             _log(f"   [i] Shrunk '{arabic[:20]}...' {requested}->{max(fitted_font_size, 8)} to fit")
 

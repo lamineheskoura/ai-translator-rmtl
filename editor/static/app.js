@@ -400,33 +400,25 @@ async function applyFontSizeToAll() {
 }
 
 async function smartFitTexts(scope = 'all') {
+  // Server-side fit = the SAME function the auto worker uses (box growth
+  // first, font shrink last). Guarantees manual == automatic results.
   if (!chapterData) return;
   pushUndo();
-  const targetPages = scope === 'page'
-    ? (chapterData.pages || []).filter(p => p.page === currentPage)
-    : (chapterData.pages || []);
-
-  let changed = 0;
-  for (const page of targetPages) {
-    for (const tt of (page.texts || [])) {
-      const nextSize = computeSmartFontSize(tt, true);
-      tt.style = tt.style || {};
-      if (tt.font_size_px !== nextSize || tt.style.font_size !== nextSize) {
-        tt.font_size_px = nextSize;
-        tt.style.font_size = nextSize;
-        changed += 1;
-      }
-    }
+  toast('ضبط ذكي عبر الخادم...', 'info');
+  try {
+    const res = await fetch(
+      `/api/chapter/${currentSlug}/${currentChapter}/smart-fit`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grow_boxes: true, unify_stroke: false }) });
+    const data = await res.json();
+    const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
+    chapterData = await res2.json();
+    await rerenderCurrentView();
+    autoFittedKey = `${currentSlug}::${currentChapter}`;
+    toast(`ضبط ذكي: صناديق ${data.grown || 0}، خط ${data.shrunk || 0} (بقي ${data.kept || 0})`, 'success');
+  } catch (e) {
+    toast('فشل الضبط الذكي: ' + e.message, 'error');
   }
-
-  if (!changed) {
-    toast('لم يتم العثور على نصوص تحتاج تغييراً', 'info');
-    return;
-  }
-
-  markDirty();
-  await rerenderCurrentView();
-  toast(`تم الضبط الذكي لـ ${changed} نص`, 'success');
 }
 
 function onFontResizeWheel(e) {
