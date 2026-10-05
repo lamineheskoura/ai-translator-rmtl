@@ -59,6 +59,11 @@ AUTO_FIT_MAX_FONT = 60
 AUTO_FIT_TARGET_FILL = 0.60
 TEXT_PADDING = 6
 
+# Latin measuring correction: the export Latin font (Arial) is ~1.25x wider
+# than the site font (measured 1.22-1.29). Without it, an extra wrap line
+# appears and the shrink loop collapses sizes needlessly.
+LATIN_WIDTH_FACTOR = 0.8
+
 
 def find_font_path(font_name: str) -> Optional[str]:
     for f in get_available_fonts():
@@ -199,10 +204,19 @@ def _render_page(background: Image.Image, texts: list[dict],
             print(f"   [!] Font '{font_name}' not found, skipping: {arabic[:30]}...")
             continue
 
-        padding_x = TEXT_PADDING
-        padding_y = TEXT_PADDING
+        padding_x = min(float(TEXT_PADDING), max(2.0, box_w * 0.02))
+        padding_y = min(float(TEXT_PADDING), max(2.0, box_h * 0.10))
         max_w = max(1, box_w - (padding_x * 2))
         max_h = max(1, box_h - (padding_y * 2))
+        # Stroke eats pixels too (textbbox ignores it).
+        _mstroke = 0.0
+        try:
+            if force_stroke and not stroke_enabled:
+                _mstroke = float(export_stroke_width or 0)
+            elif stroke_enabled:
+                _mstroke = float(stroke_width or 0)
+        except Exception:
+            _mstroke = 0.0
 
         def _wrap_and_measure(cur_font):
             raw_lines = arabic.split("\n")
@@ -211,6 +225,7 @@ def _render_page(background: Image.Image, texts: list[dict],
                 if not raw_line.strip():
                     wrapped.append("")
                     continue
+                _lat_factor = 1.0 if _has_arabic(raw_line) else LATIN_WIDTH_FACTOR
                 reshaped_words = _reshape_arabic_no_bidi(raw_line).split()
                 current_words = []
                 for w in reshaped_words:
@@ -218,7 +233,7 @@ def _render_page(background: Image.Image, texts: list[dict],
                     test = " ".join(test_words)
                     try:
                         tb = draw.textbbox((0, 0), test, font=cur_font)
-                        tw = tb[2] - tb[0]
+                        tw = (tb[2] - tb[0]) * _lat_factor
                     except Exception:
                         tw = 0
                     if tw > max_w and current_words:
@@ -253,7 +268,7 @@ def _render_page(background: Image.Image, texts: list[dict],
                     continue
                 try:
                     tb = draw.textbbox((0, 0), line, font=cur_font)
-                    lw = tb[2] - tb[0]
+                    lw = (tb[2] - tb[0]) * (1.0 if _has_arabic(line) else LATIN_WIDTH_FACTOR)
                     lh = tb[3] - tb[1]
                 except Exception:
                     lw = 0
@@ -267,14 +282,16 @@ def _render_page(background: Image.Image, texts: list[dict],
             return wrapped, line_widths, line_heights, base_line_h, total_text_h
 
         # Site-faithful sizing: start from the site/editor font size and
-        # shrink ONLY until the text fits the box. Never upscale to "fill"
-        # the box — the site typography (SFX huge, narration small) must stay
-        # as authored. font_scale (export option) multiplies the start size.
+        # shrink ONLY until the text fits the box (padding first, never the
+        # opposite). Two guarantees: (1) untranslated (Latin-only) text is
+        # NEVER shrunk below site size — the site itself proves it fits;
+        # (2) the floor is 8 only for translated text that truly overflows.
         requested = max(8, int(round(font_size * FONT_SCALE * font_scale)))
+        min_size = requested if not _has_arabic(arabic) else 8
         font = None
         wrapped, line_widths, line_heights, base_line_h, total_text_h = [], [], [], 0, 0
         fitted_font_size = requested
-        while fitted_font_size >= 8:
+        while True:
             try:
                 font = ImageFont.truetype(font_path, fitted_font_size)
             except Exception:
@@ -282,7 +299,10 @@ def _render_page(background: Image.Image, texts: list[dict],
                 break
             wrapped, line_widths, line_heights, base_line_h, total_text_h = _wrap_and_measure(font)
             widest = max(line_widths) if line_widths else 0
-            if total_text_h <= max_h and widest <= max_w:
+            if (total_text_h <= max_h
+                    and widest + 2 * _mstroke <= max_w):
+                break
+            if fitted_font_size <= min_size:
                 break
             fitted_font_size -= 1
         if fitted_font_size < requested:

@@ -346,7 +346,9 @@ function computeSmartFontSize(t, allowGrow = false) {
 }
 
 // Auto-fit every rendered overlay after load/translation: shrink ONLY
-// overflowing texts so each box "takes its size". Never enlarges.
+// overflowing TRANSLATED texts so each box "takes its size".
+// Untranslated (English) texts are NEVER touched: the source site proves
+// they fit at site size. Never enlarges.
 function autoFitOverflows() {
   if (!chapterData) return 0;
   let fixed = 0;
@@ -354,6 +356,7 @@ function autoFitOverflows() {
     const ov = textOverlaysById[id];
     if (!ov || !ov.el || !ov.data) continue;
     const t = ov.data;
+    if (!((t.arabic_text || '').trim())) continue;
     const cur = parseInt(t.style?.font_size || t.font_size_px || 45, 10) || 45;
     const fit = computeSmartFontSize(t);
     if (fit < cur) {
@@ -720,6 +723,7 @@ async function renderSinglePage(pageNum) {
 // sizes and "apply to all" are never crushed back).
 let autoFittedKey = '';
 function autoFitOnceForChapter() {
+  if (!isAutoModeEnabled()) return;
   const key = `${currentSlug}::${currentChapter}`;
   if (autoFittedKey === key) return;
   autoFittedKey = key;
@@ -1677,6 +1681,7 @@ function getAutoModePrefs() {
     return el ? !!el.checked : !!def;
   };
   return {
+    enabled: v('automode-master', true),
     translate: v('automode-translate', true),
     smartfont: v('automode-smartfont', true),
     stroke: v('automode-stroke', true),
@@ -1688,14 +1693,32 @@ function loadAutoModePrefs() {
   try { saved = JSON.parse(localStorage.getItem(autoModePrefsKey) || 'null'); } catch (e) { saved = null; }
   if (!saved) return getAutoModePrefs();
   const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.checked = !!val; };
+  set('automode-master', saved.enabled);
   set('automode-translate', saved.translate);
   set('automode-smartfont', saved.smartfont);
   set('automode-stroke', saved.stroke);
   set('automode-export', saved.export);
+  applyAutoMasterState();
   return getAutoModePrefs();
+}
+function applyAutoMasterState() {
+  const on = document.getElementById('automode-master')?.checked !== false;
+  for (const id of ['automode-translate', 'automode-smartfont', 'automode-stroke', 'automode-export']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !on;
+  }
 }
 function saveAutoModePrefs() {
   try { localStorage.setItem(autoModePrefsKey, JSON.stringify(getAutoModePrefs())); } catch (e) {}
+  applyAutoMasterState();
+}
+function isAutoModeEnabled() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(autoModePrefsKey) || 'null');
+    if (saved && saved.enabled === false) return false;
+  } catch (e) {}
+  const el = document.getElementById('automode-master');
+  return el ? !!el.checked : true;
 }
 
 async function translateChapterViaProvider(slug, chapter) {
@@ -1727,7 +1750,7 @@ async function startBatchScrape() {
   const autoPrefs = getAutoModePrefs();
   try { saveAutoModePrefs(); } catch (e) {}
   let auto_translate = null;
-  if (autoPrefs.translate) {
+  if (autoPrefs.enabled && autoPrefs.translate) {
     const pid = document.getElementById('scrape-provider')?.value || selectedProvider;
     const model = document.getElementById('scrape-provider-model')?.value || selectedProviderModel;
     const fallback = getScrapeAutoTranslate();
@@ -1736,7 +1759,7 @@ async function startBatchScrape() {
     if (usePid && useModel) auto_translate = { provider_id: usePid, model: useModel, smart_font: !!autoPrefs.smartfont, unify_stroke: !!autoPrefs.stroke };
   }
   let auto_export = null;
-  if (autoPrefs.export) {
+  if (autoPrefs.enabled && autoPrefs.export) {
     const q = parseInt(document.getElementById('export-quality')?.value || '90', 10) || 90;
     const mh = parseInt(document.getElementById('export-max-height')?.value || '9000', 10) || 9000;
     auto_export = { format: 'webp', quality: q, merge: true, max_height: mh };
@@ -2599,6 +2622,7 @@ window.addEventListener('beforeunload', e => {
 async function showSettingsModal() {
   document.getElementById('settings-modal').classList.remove('hidden');
   document.getElementById('settings-status').textContent = '';
+  document.getElementById('settings-export-status').textContent = '';
   try {
     const res = await fetch('/api/settings');
     const data = await res.json();
@@ -2606,6 +2630,11 @@ async function showSettingsModal() {
   } catch (e) {
     document.getElementById('settings-status').textContent = 'تعذر قراءة الإعدادات';
   }
+  try {
+    const res = await fetch('/api/settings/export');
+    const data = await res.json();
+    document.getElementById('settings-export-dir').value = data.export_dir || '';
+  } catch (e) {}
 }
 function hideSettingsModal() {
   document.getElementById('settings-modal').classList.add('hidden');
@@ -2631,4 +2660,24 @@ async function saveSettings() {
   } catch (e) {
     st.textContent = 'خطأ: ' + e.message;
   }
+}
+async function saveExportDir() {
+  const dir = document.getElementById('settings-export-dir').value.trim();
+  const st = document.getElementById('settings-export-status');
+  try {
+    const res = await fetch('/api/settings/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ export_dir: dir }),
+    });
+    const data = await res.json();
+    st.textContent = 'مجلد التصدير: ' + (data.export_dir || '(مع الفصول)');
+    toast('تم حفظ مجلد التصدير', 'success');
+  } catch (e) {
+    st.textContent = 'خطأ: ' + e.message;
+  }
+}
+async function clearExportDir() {
+  document.getElementById('settings-export-dir').value = '';
+  await saveExportDir();
 }

@@ -171,6 +171,7 @@ DEFAULT_EXPORT_SETTINGS: dict = {
     "stroke_w": 1.5,
     "stroke_color": "#ffffff",
     "bg_color": "#ffffff",
+    "export_dir": "",
 }
 
 
@@ -217,6 +218,25 @@ class ExportSettingsPayload(BaseModel):
     stroke_w: Optional[float] = None
     stroke_color: Optional[str] = None
     bg_color: Optional[str] = None
+    export_dir: Optional[str] = None
+
+
+def _resolve_export_dir(slug: str, chapter: str) -> Path:
+    """Where exported files live.
+
+    Optional separate export base (settings → export_dir):
+    <base>/<slug>/chapter_<N>/. Default: <chapter>/exported/ (unchanged).
+    """
+    _safe_slug(slug)
+    base = (_load_export_settings().get("export_dir") or "").strip()
+    if base:
+        d = Path(base) / slug / f"chapter_{chapter}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    ch_dir = _chapter_dir(slug, chapter)
+    d = ch_dir / "exported"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 @app.get("/api/settings/export")
@@ -227,6 +247,18 @@ def get_export_settings():
 @app.post("/api/settings/export")
 def save_export_settings(payload: ExportSettingsPayload):
     patch = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if patch.get("export_dir"):
+        p = Path(str(patch["export_dir"])).expanduser()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            t = p / ".write_test"
+            t.write_text("ok", encoding="utf-8")
+            t.unlink()
+            patch["export_dir"] = str(p.resolve())
+        except Exception as e:
+            raise HTTPException(400, f"Export folder not writable: {e}")
+    elif "export_dir" in patch and not patch["export_dir"]:
+        patch["export_dir"] = ""
     return _save_export_settings(patch)
 
 
@@ -541,7 +573,7 @@ def export_chapter_endpoint(
     export_stroke_color: str = Query(default="#ffffff", alias="export_stroke_color"),
 ):
     ch_dir = _chapter_dir(slug, chapter)
-    export_dir = ch_dir / "exported"
+    export_dir = _resolve_export_dir(slug, chapter)
     page_range = None
     _ex_defaults = _load_export_settings()
     if export_merge is None:
@@ -578,9 +610,10 @@ def get_exported(slug: str, chapter: str, filename: str):
     ch_dir = _chapter_dir(slug, chapter)
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(400, "Invalid filename")
-    file_path = (ch_dir / "exported" / filename).resolve()
+    export_dir = _resolve_export_dir(slug, chapter)
+    file_path = (export_dir / filename).resolve()
     try:
-        file_path.relative_to(ch_dir.resolve())
+        file_path.relative_to(export_dir.resolve())
     except ValueError:
         raise HTTPException(400, "Invalid filename")
     if not file_path.exists():
@@ -597,9 +630,9 @@ def download_zip(slug: str, chapter: str,
                  dl_merge: bool = Query(default=False, alias="merge"),
                  dl_max_height: int = Query(default=9000, alias="max_height")):
     ch_dir = _chapter_dir(slug, chapter)
-    export_dir = ch_dir / "exported"
+    export_dir = _resolve_export_dir(slug, chapter)
 
-    if not export_dir.exists() or not list(export_dir.iterdir()):
+    if not list(export_dir.iterdir()):
         export_chapter(ch_dir, export_dir, fmt=dl_format, quality=dl_quality, merge=dl_merge, max_height=dl_max_height)
 
     buf = io.BytesIO()
@@ -1262,7 +1295,13 @@ def _batch_worker():
                     ex_sw = float(ex.get("stroke_w", ex.get("export_stroke_w", 1.5)))
                     ex_sc = _parse_color(ex.get("stroke_color",
                                                 ex.get("export_stroke_color", "#ffffff")))
-                    export_dir = ch_dir / "exported"
+                    try:
+                        export_dir = _resolve_export_dir(
+                            ch_dir.parent.name,
+                            ch_dir.name.replace("chapter_", ""))
+                    except HTTPException:
+                        export_dir = ch_dir / "exported"
+                        export_dir.mkdir(parents=True, exist_ok=True)
                     export_chapter(ch_dir, export_dir, fmt=ex_fmt, quality=ex_quality,
                                    merge=ex_merge, max_height=ex_max_h,
                                    font_scale=ex_font_scale, line_gap=ex_line_gap,
