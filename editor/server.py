@@ -222,10 +222,12 @@ class ExportSettingsPayload(BaseModel):
 
 
 def _resolve_export_dir(slug: str, chapter: str) -> Path:
-    """Where exported files live.
+    """Where finished exported files live (the 'done' archive).
 
-    Optional separate export base (settings → export_dir):
-    <base>/<slug>/chapter_<N>/. Default: <chapter>/exported/ (unchanged).
+    - If the user configured an export base (settings): <base>/<slug>/chapter_<N>/
+    - Default (smart): <app>/published/<slug>/chapter_<N>/ — created automatically,
+      one folder per manga, finished chapters ordered inside. The working
+      output/<slug>/ tree stays for work-in-progress only.
     """
     _safe_slug(slug)
     base = (_load_export_settings().get("export_dir") or "").strip()
@@ -233,8 +235,7 @@ def _resolve_export_dir(slug: str, chapter: str) -> Path:
         d = Path(base) / slug / f"chapter_{chapter}"
         d.mkdir(parents=True, exist_ok=True)
         return d
-    ch_dir = _chapter_dir(slug, chapter)
-    d = ch_dir / "exported"
+    d = Path(__file__).parent.parent / "published" / slug / f"chapter_{chapter}"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

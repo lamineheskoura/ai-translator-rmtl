@@ -10,6 +10,7 @@ config.json
 *.bin
 output/*/
 output/
+published/
 translator/models/*.gguf
 translator/providers/providers_config.json
 translator/models/*.part
