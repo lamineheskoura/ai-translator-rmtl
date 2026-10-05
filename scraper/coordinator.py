@@ -431,6 +431,16 @@ def process_chapter(driver, url: str, slug: str, ch_num: str, base_dir: Path):
         )
     except TimeoutException:
         print("[!] Page load timeout.")
+        try:
+            dbg = base_dir / f"chapter_{ch_num}" / "_debug"
+            dbg.mkdir(parents=True, exist_ok=True)
+            driver.save_screenshot(str(dbg / "timeout.png"))
+            (dbg / "timeout.html").write_text(
+                driver.page_source or "", encoding="utf-8", errors="replace")
+            print(f"   [i] Debug snapshot saved: {dbg} "
+                  f"(open timeout.png to see Cloudflare wall / 404 / blank)")
+        except Exception:
+            pass
         return None
 
     result = parse_chapter_full(driver)
