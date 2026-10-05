@@ -16,7 +16,7 @@ REM --- user fonts ARE needed on new machines (Hayah etc.) ---
 mkdir "%STAGE%\MangaAI\fonts\_user" 2>nul
 robocopy "fonts\_user" "%STAGE%\MangaAI\fonts\_user" *.ttf *.otf .gitkeep >nul
 REM --- entry + setup files ---
-for %%F in (main.py requirements.txt install.bat start_server.bat .env.example .gitignore README-WORKERS.txt) do (
+for %%F in (main.py requirements.txt install.bat start_server.bat update.bat smoke.bat package.bat .env.example .gitignore README.md README-WORKERS.txt VERSION CONTRACTS.md) do (
   if exist "%%F" copy /y "%%F" "%STAGE%\MangaAI\" >nul
 )
 REM --- empty runtime folders (created with .gitkeep so structure is exact) ---
