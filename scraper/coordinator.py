@@ -640,23 +640,44 @@ def scrape_chapter(url: str, headless: bool = True, browser: str = "brave"):
     base_dir = _resolve_base_root() / sanitize(slug)
     base_dir.mkdir(parents=True, exist_ok=True)
 
+    # Preflight: report what can actually run here (see server/UI logs).
+    spider_reason = ""
+    try:
+        from .engine import check_browser_env
+        env = check_browser_env()
+        print(f"   [i] Engines: scrapling={env.get('scrapling')} "
+              f"spider_browser={env.get('scrapling_browser')} "
+              f"brave={bool(env.get('brave'))} "
+              f"chrome={bool(env.get('chrome'))}")
+        if env.get("hint"):
+            print(f"   [i] Hint: {env['hint']}")
+    except Exception:
+        pass
+
     # Attempt 1: new Scrapling spider + pipeline path
     try:
         print("\n[i] Trying Scrapling spider path...")
         ch_dir = process_chapter_spider(url, slug, ch_num, base_dir)
         if ch_dir is not None:
             return ch_dir
+        spider_reason = "spider returned no data"
         print("   [!] Spider path returned None - falling back to Selenium.")
     except Exception as e:
-        print(f"   [!] Spider path failed ({e}) - falling back to Selenium.")
+        spider_reason = str(e)[:300]
+        print(f"   [!] Spider path failed ({spider_reason}) - falling back to Selenium.")
 
     # Attempt 2: legacy Selenium fallback
     if not _SELENIUM_AVAILABLE or setup_driver is None:
-        print("   [!] Selenium not available - cannot use legacy fallback.")
-        return None
+        raise RuntimeError(
+            "فشل المسار الأساسي (spider): " + (spider_reason or "unknown") +
+            ". ولا يوجد مسار Selenium احتياطي على هذا الجهاز.")
     print(f"\n[i] Starting {browser} (headless={headless})...")
-    driver = setup_driver(headless=headless, browser=browser)
-
+    try:
+        driver = setup_driver(headless=headless, browser=browser)
+    except Exception as e:
+        raise RuntimeError(
+            "فشل المسار الأساسي (spider): " + (spider_reason or "unknown") +
+            f". وفشل الاحتياطي (selenium): {e}")
     try:
         ch_dir = process_chapter(driver, url, slug, ch_num, base_dir)
         return ch_dir

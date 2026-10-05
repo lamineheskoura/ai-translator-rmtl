@@ -11,13 +11,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from PIL import Image
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    from webdriver_manager.chrome import ChromeDriverManager
+    _SELENIUM_OK = True
+except Exception as _e:  # partial install on worker machines: spider path still works
+    webdriver = None
+    Service = None
+    By = None
+    WebDriverWait = None
+    EC = None
+    TimeoutException = Exception
+    ChromeDriverManager = None
+    _SELENIUM_OK = False
+    _SELENIUM_IMPORT_ERROR = str(_e)
 
 HEADERS = {
     "User-Agent": (
@@ -51,6 +64,105 @@ def _find_brave() -> str | None:
     return None
 
 
+def _find_chrome() -> str | None:
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    try:
+        out = subprocess.run(["where", "chrome"], capture_output=True,
+                             timeout=10, text=True)
+        for line in (out.stdout or "").splitlines():
+            line = line.strip().strip('"')
+            if line.lower().endswith("chrome.exe") and os.path.exists(line):
+                return line
+    except Exception:
+        pass
+    return None
+
+
+def check_browser_env() -> dict:
+    """Preflight: what scraping engines can actually run here?
+
+    Returns {"scrapling": bool, "brave": path|None, "chrome": path|None,
+             "selenium": bool, "hint": str}. Never raises.
+    """
+    info: dict = {"scrapling": False, "brave": None, "chrome": None,
+                  "selenium": False, "hint": ""}
+    try:
+        import scrapling  # noqa: F401
+        info["scrapling"] = True
+    except Exception as e:
+        info["hint"] = f"scrapling missing: {e}"
+        return info
+    # scrapling browser downloaded? (patchright/playwright chromium)
+    try:
+        cands = [
+            Path.home() / ".cache" / "ms-playwright",
+            Path(os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")),
+            Path(os.path.expandvars(r"%APPDATA%")) / "ms-playwright",
+        ]
+        for c in cands:
+            try:
+                if c.exists() and any(c.iterdir()):
+                    info["scrapling_browser"] = True
+                    break
+            except Exception:
+                continue
+        else:
+            info["scrapling_browser"] = False
+            info["hint"] = ("scrapling browser not downloaded — "
+                            "re-run install.bat (step 5/5)")
+    except Exception:
+        info["scrapling_browser"] = False
+    info["brave"] = _find_brave()
+    info["chrome"] = _find_chrome()
+    try:
+        import selenium  # noqa: F401
+        info["selenium"] = True
+    except Exception:
+        pass
+    if not info["brave"] and not info["chrome"]:
+        info["hint"] += (" | No Brave/Chrome found — install official Chrome "
+                         "or rely on the scrapling browser.")
+    return info
+
+
+def _clear_stale_wdm_locks(max_age_min: float = 10.0) -> int:
+    """Delete webdriver-manager lock files left by crashed runs.
+
+    A stale `wdm-lock-*` makes every later run hang with
+    "Timed out waiting for webdriver". Returns count removed.
+    """
+    removed = 0
+    try:
+        cache = Path.home() / ".wdm"
+        if not cache.exists():
+            return 0
+        import time as _t
+        now = _t.time()
+        for lock in cache.rglob("wdm-lock-*"):
+            try:
+                age_min = (now - lock.stat().st_mtime) / 60.0
+                if age_min > max_age_min:
+                    if lock.is_dir():
+                        shutil.rmtree(lock, ignore_errors=True)
+                    else:
+                        lock.unlink(missing_ok=True)
+                    removed += 1
+                    print(f"   [i] Removed stale webdriver lock "
+                          f"({age_min:.0f} min old): {lock.name}")
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return removed
+
+
 def _kill_process(name: str):
     try:
         subprocess.run(
@@ -76,7 +188,9 @@ def _build_options(
     headless: bool,
     binary_path: str | None = None,
     profile_dir: str | None = None,
-) -> webdriver.ChromeOptions:
+) -> "webdriver.ChromeOptions":
+    if not _SELENIUM_OK:
+        raise RuntimeError("Selenium unavailable.")
     options = webdriver.ChromeOptions()
 
     if headless:
@@ -100,7 +214,11 @@ def _build_options(
     return options
 
 
-def setup_driver(headless: bool = True, browser: str = "brave") -> webdriver.Chrome:
+def setup_driver(headless: bool = True, browser: str = "brave") -> "webdriver.Chrome":
+    if not _SELENIUM_OK:
+        raise RuntimeError(
+            "مسار Selenium غير متوفر (selenium ناقص: "
+            f"{_SELENIUM_IMPORT_ERROR[:150]}). أعد تشغيل install.bat.")
     # NOTE: _kill_process("chromedriver.exe") disabled (no-op) to avoid killing adjacent tasks.
     pass
 
@@ -108,6 +226,18 @@ def setup_driver(headless: bool = True, browser: str = "brave") -> webdriver.Chr
     if browser == "brave" and not brave_path:
         print("   [!] Brave not found. Falling back to Chrome.")
         browser = "chrome"
+    if browser == "chrome" and not _find_chrome():
+        # No system browser at all: the driver alone cannot render pages.
+        # Fail fast with a human message instead of a cryptic timeout.
+        raise RuntimeError(
+            "لا يوجد Brave ولا Chrome على هذا الجهاز. "
+            "ثبّت متصفح Chrome الرسمي من google.com/chrome ثم أعد المحاولة، "
+            "أو تأكد أن خطوة متصفح السكرابر في install.bat تمت بنجاح."
+        )
+
+    # A previous crashed run may have left a webdriver-manager lock behind;
+    # without cleanup every later run hangs on "Timed out waiting for webdriver".
+    _clear_stale_wdm_locks()
 
     browser_order = [browser]
     if browser == "brave":
@@ -133,7 +263,14 @@ def setup_driver(headless: bool = True, browser: str = "brave") -> webdriver.Chr
         )
 
         try:
-            driver_path = ChromeDriverManager().install()
+            try:
+                driver_path = ChromeDriverManager().install()
+            except Exception as e:
+                msg = str(e)
+                hint = ("تعذّر تحميل chromedriver (إنترنت؟ بروكسي؟ مضاد فيروسات؟). "
+                        "أعد تشغيل install.bat، وإن تكرر أرسل install.log للدعم. "
+                        f"التفاصيل: {msg[:200]}")
+                raise RuntimeError(hint)
             service = Service(driver_path)
             driver = webdriver.Chrome(service=service, options=opts)
             driver.execute_script(
@@ -150,7 +287,6 @@ def setup_driver(headless: bool = True, browser: str = "brave") -> webdriver.Chr
             last_error = e
             if is_brave:
                 print("   [i] Retrying with Chrome...")
-                _clear_wdm_cache()
             continue
 
     # All attempts failed — clean up and raise
