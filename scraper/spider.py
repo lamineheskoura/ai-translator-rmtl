@@ -62,6 +62,64 @@ def parse_style_px(style: str, prop: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+def detect_left_mode(pairs: list, image_center_css: float) -> str:
+    """Auto-detect whether site `left` is box CENTER or box LEFT EDGE.
+
+    - pairs: iterable of (left_raw_css, css_width) for non-empty overlays.
+    - image_center_css: CSS x of the page image center (e.g. rendered_w/2).
+
+    Rule (per-chapter): if mean(left + width/2) is closer to the image
+    center than mean(left) itself, then `left` is the left EDGE
+    (true center = left + width/2); otherwise `left` is already the CENTER.
+    Returns "edge" or "center" (default "center" = legacy behaviour).
+    """
+    try:
+        valid = [(float(l), float(w)) for l, w in (pairs or [])
+                 if float(l) > 0 and float(w) > 0]
+    except Exception:
+        return "center"
+    if not valid:
+        return "center"
+    try:
+        cx = float(image_center_css)
+    except Exception:
+        return "center"
+    n = len(valid)
+    mean_left = sum(l for l, _ in valid) / n
+    mean_edge_center = sum(l + w / 2.0 for l, w in valid) / n
+    if abs(mean_edge_center - cx) < abs(mean_left - cx):
+        return "edge"
+    return "center"
+
+
+def resolve_left_geometry(left_raw: float, css_width: float, mode: str
+                          ) -> tuple[float, float]:
+    """Apply the correct equation for the detected mode.
+
+    Returns (css_left, css_left_center):
+    - center: css_left = left - width/2, center = left (legacy).
+    - edge:   css_left = left, center = left + width/2.
+    Clamps css_left >= 0 (same as legacy).
+    """
+    try:
+        lr = float(left_raw or 0.0)
+    except Exception:
+        lr = 0.0
+    try:
+        w = float(css_width or 0.0)
+    except Exception:
+        w = 0.0
+    if mode == "edge":
+        left_center = lr + w / 2.0
+        css_left = lr
+    else:
+        left_center = lr
+        css_left = lr - w / 2.0
+    if css_left < 0:
+        css_left = 0
+    return css_left, left_center
+
+
 def _pick_img_src(attrib: dict) -> str | None:
     """Fallback chain: src -> data-src -> data-lazy-src -> srcset(first URL)."""
     for key in ("src", "data-src", "data-lazy-src"):
@@ -97,17 +155,61 @@ def extract_image_urls(page) -> list:
     return urls
 
 
-def extract_overlays(page, num_images: int = 0) -> dict:
+def extract_overlays(page, num_images: int = 0,
+                     image_center_css: float | None = None) -> dict:
     """Extract overlays -> {page_idx: [dict]} same shape as extractor.py.
 
     - img_x_offset assumed 0 (no JS measurement; rendered HTML).
     - page index from id regex split_(\\d+), else 0.
     - data-box-width / data-box-height / data-base-font-size as fallback.
+    - `left` semantics auto-detected per chapter via detect_left_mode():
+      default image center = 400css (rendered_w=800 fallback) unless
+      image_center_css is given (e.g. rendered_w/2 from the caller).
     """
     try:
         overlay_els = page.css("div.manga-ocr-button-overlay")
     except Exception:
         return {}
+
+    # ---- pass 1: collect raw geometry for non-empty overlays ----
+    raw_items: list = []
+    for el in overlay_els:
+        try:
+            attrib = el.attrib or {}
+            style = attrib.get("style") or ""
+            try:
+                spans = el.css("span")
+                text = (spans[0].text or "").strip() if len(spans) > 0 else ""
+            except Exception:
+                text = ""
+            if not text:
+                continue
+            left_raw = parse_style_px(style, "left")
+            w = parse_style_px(style, "max-width")
+            if w == 0:
+                w = parse_float(attrib.get("data-box-width"))
+            if left_raw > 0 and w > 0:
+                raw_items.append((left_raw, w))
+        except Exception:
+            continue
+
+    cx = 400.0 if image_center_css is None else float(image_center_css)
+    try:
+        cx = float(cx)
+    except Exception:
+        cx = 400.0
+    left_mode = detect_left_mode(raw_items, cx)
+    try:
+        if raw_items:
+            _ml = sum(l for l, _ in raw_items) / len(raw_items)
+            _mc = sum(l + w / 2.0 for l, w in raw_items) / len(raw_items)
+            print(f"   [i] left-mode={left_mode} "
+                  f"(mean_left={_ml:.1f} mean_edge_center={_mc:.1f} "
+                  f"img_cx={cx:.1f} n={len(raw_items)})")
+        else:
+            print(f"   [i] left-mode={left_mode} (no overlays)")
+    except Exception:
+        pass
 
     page_texts: dict = {}
     geo_tops: dict = {}
@@ -173,11 +275,9 @@ def extract_overlays(page, num_images: int = 0) -> dict:
                     or attrib.get("data-font-size")
                 )
 
-            # No JS offset measurement -> 0
-            left_center = left_center_raw
-            css_left = left_center - css_width / 2.0
-            if css_left < 0:
-                css_left = 0
+            # No JS offset measurement -> 0; left semantics per-chapter.
+            css_left, left_center = resolve_left_geometry(
+                left_center_raw, css_width, left_mode)
 
             page_num = 0
             m = re.search(r"split_(\d+)", el_id)
@@ -260,11 +360,13 @@ def fetch_chapter_page(url: str, timeout: int = 60000):
 
     try:
         image_urls = extract_image_urls(page)
-        page_texts, geo_tops = extract_overlays(page, num_images=len(image_urls))
-        title = extract_title(page)
         # No reliable JS width measurement here; use common PNG width
         # so coordinator falls back to PNG-based estimation.
         rendered_w = 800.0
+        page_texts, geo_tops = extract_overlays(
+            page, num_images=len(image_urls),
+            image_center_css=rendered_w / 2.0)
+        title = extract_title(page)
         css_heights: list = []
         total = sum(len(v) for v in page_texts.values())
         print(f"   [+] Spider: {len(image_urls)} images | {total} overlays "

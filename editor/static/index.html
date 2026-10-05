@@ -368,6 +368,27 @@
         <p style="color:var(--text-dim); margin-bottom:8px; font-size:12px;">— أو دفعة: عدة روابط (سطر لكل رابط) عبر POST /api/batch-scrape —</p>
         <textarea id="scrape-urls-batch" rows="4" placeholder="https://manhuarmtl.com/manga/.../chapter-1&#10;https://manhuarmtl.com/manga/.../chapter-2" style="width:100%; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px; resize:vertical;"></textarea>
       </div>
+      <div style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); border:1px solid var(--border);">
+        <div style="font-size:12px; font-weight:600; margin-bottom:8px;">⚙ الوضع الأوتوماتيكي</div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--text-dim);">
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="automode-translate" checked onchange="saveAutoModePrefs()">
+            ترجمة تلقائية
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="automode-smartfont" checked onchange="saveAutoModePrefs()">
+            ضبط ذكي للخط
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="automode-stroke" checked onchange="saveAutoModePrefs()">
+            توحيد السترُوك
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="automode-export" checked onchange="saveAutoModePrefs()">
+            تصدير webp مدمج
+          </label>
+        </div>
+      </div>
       <div id="scrape-status" class="hidden" style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--text-dim); max-height:200px; overflow-y:auto; white-space:pre-wrap;"></div>
       <div id="batch-status" class="hidden" style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--text-dim); max-height:200px; overflow-y:auto; white-space:pre-wrap;"></div>
     </div>
@@ -424,7 +445,7 @@
       <div class="panel-section">
         <div class="panel-header"><span class="panel-title">Stroke (التخطيط) — للتصدير</span></div>
         <label class="prop-label" style="display:flex; align-items:center; gap:6px;">
-          <input type="checkbox" id="export-force-stroke">
+          <input type="checkbox" id="export-force-stroke" checked>
           فرض Stroke على كل النصوص (إذا لم يكن مفعّلاً)
         </label>
         <div style="margin-top:6px;">
@@ -443,7 +464,7 @@
       <div class="panel-section">
         <div class="panel-header"><span class="panel-title">الدمج والتقطيع</span></div>
         <label class="prop-label" style="display:flex; align-items:center; gap:6px;">
-          <input type="checkbox" id="export-merge">
+          <input type="checkbox" id="export-merge" checked>
           دمج كل الصفحات في شريط طويل (webtoon)
         </label>
         <div style="margin-top:8px;">

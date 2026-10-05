@@ -57,6 +57,7 @@ FONT_SCALE = 1.0
 AUTO_FIT_MIN_FONT = 30
 AUTO_FIT_MAX_FONT = 60
 AUTO_FIT_TARGET_FILL = 0.60
+TEXT_PADDING = 6
 
 
 def find_font_path(font_name: str) -> Optional[str]:
@@ -119,6 +120,17 @@ def _pick_font_path(font_name: str, text: str) -> Optional[str]:
         if Path(cand).exists():
             return cand
     return find_font_path(font_name)
+
+
+def _log(msg: str) -> None:
+    """Console log immune to cp1252 consoles (Arabic text safe)."""
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        try:
+            print(msg.encode("ascii", "replace").decode("ascii"), flush=True)
+        except Exception:
+            pass
 
 
 def _shape_arabic(text: str) -> str:
@@ -187,8 +199,8 @@ def _render_page(background: Image.Image, texts: list[dict],
             print(f"   [!] Font '{font_name}' not found, skipping: {arabic[:30]}...")
             continue
 
-        padding_x = 4
-        padding_y = 4
+        padding_x = TEXT_PADDING
+        padding_y = TEXT_PADDING
         max_w = max(1, box_w - (padding_x * 2))
         max_h = max(1, box_h - (padding_y * 2))
 
@@ -274,7 +286,7 @@ def _render_page(background: Image.Image, texts: list[dict],
                 break
             fitted_font_size -= 1
         if fitted_font_size < requested:
-            print(f"   [i] Shrunk '{arabic[:20]}...' {requested}->{max(fitted_font_size, 8)} to fit")
+            _log(f"   [i] Shrunk '{arabic[:20]}...' {requested}->{max(fitted_font_size, 8)} to fit")
 
         if font is None:
             print(f"   [!] Could not load font '{font_name}' at size {fitted_font_size}")
@@ -283,7 +295,7 @@ def _render_page(background: Image.Image, texts: list[dict],
         draw_stroke = stroke_enabled and stroke_width > 0
         eff_stroke_w = stroke_width
         eff_stroke_c = stroke_color
-        if force_stroke:
+        if force_stroke and not stroke_enabled:
             draw_stroke = export_stroke_width > 0
             eff_stroke_w = export_stroke_width
             eff_stroke_c = export_stroke_color if export_stroke_color else stroke_color
@@ -495,13 +507,13 @@ def export_chapter(
         # Merge + save each chunk
         for chunk in chunks:
             strip = _merge_chunk(chunk, bg_color=bg_color)
-            out_name = f"output_p{part_counter}.{img_format}"
+            out_name = f"output_p{part_counter:03d}.{img_format}"
             part_counter += 1
             out_path = output_dir / out_name
             _save_image(strip, out_path, pillow_fmt, quality)
             exported.append(out_path.name)
             pages_str = "صفحة" if len(chunk) == 1 else f"{len(chunk)} صفحات"
-            print(f"   [+] {out_path.name} ({strip.width}x{strip.height}) — {pages_str}")
+            _log(f"   [+] {out_path.name} ({strip.width}x{strip.height}) — {pages_str}")
 
     else:
         # Non-merge: each page exported individually

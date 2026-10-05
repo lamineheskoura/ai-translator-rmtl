@@ -260,6 +260,38 @@ def assign_texts_to_images(
     else:
         h0, gap = 0.0, 0.0
 
+    # Container-vs-image X offset: overlay boxes sometimes span a WIDER
+    # container than the page image (e.g. ~950css container vs a 700px
+    # image centered inside it). Then css_left lives in container space
+    # and every box shifts left by the side margin. Applied ONLY when
+    # proven (boxes wider than the image); otherwise the legacy path keeps
+    # all existing chapters byte-identical. Y mapping is untouched.
+    import statistics as _st
+    x_scale, x_offset = scale, 0.0
+    try:
+        _rights = []
+        for _v in (page_texts or {}).values():
+            for _o in (_v or []):
+                _w = float(_o.get("css_width", 0) or 0)
+                if _w > 0:
+                    _rights.append(float(_o.get("css_left", 0) or 0) + _w)
+        _nat_ws = [w for w, _ in (png_dims or []) if w and w > 0]
+        if _rights and _nat_ws:
+            _rights.sort()
+            _container_w = _rights[min(len(_rights) - 1,
+                                       int(len(_rights) * 0.99))]
+            _med_nat = _st.median(_nat_ws)
+            if _container_w > _med_nat * 1.02:
+                _displayed = min(_med_nat, _container_w)
+                if _displayed > 0:
+                    x_scale = _med_nat / _displayed
+                    x_offset = max(0.0, (_container_w - _displayed) / 2.0)
+                    print(f"   [i] X-offset: container {_container_w:.0f}css "
+                          f"vs page {_displayed:.0f}css -> "
+                          f"shift {x_offset:.1f}css, s_x={x_scale:.4f}")
+    except Exception:
+        x_scale, x_offset = scale, 0.0
+
     css_cumulative = [0.0]
     for i in range(total_pages):
         if i < len(css_img_heights) and css_img_heights[i] > 0:
@@ -297,16 +329,25 @@ def assign_texts_to_images(
             max_rel = max(0.0, page_css_h - ov_css_h)
             rel_css_top = min(max(rel_css_top, 0.0), max_rel)
 
-            x_px = round(ov["css_left"] * scale, 2)
+            x_px = round(max(0.0, ov["css_left"] - x_offset) * x_scale, 2)
             y_px = round(rel_css_top * scale, 2)
-            x_center_px = round(ov["css_left_center"] * scale, 2)
-            width_px = round(ov["css_width"] * scale, 2)
+            x_center_px = round(
+                max(0.0, ov["css_left_center"] - x_offset) * x_scale, 2)
+            width_px = round(ov["css_width"] * x_scale, 2)
             height_px = round(ov["css_height"] * scale, 2)
             font_px = round(ov["css_font_size"] * scale, 2)
 
             x_px = max(0.0, x_px)
             if trust_page_id and x_px + width_px > page_width:
                 x_px = max(0.0, page_width - width_px)
+            # X-safety: box must fit inside the page (contract-admission has
+            # max-width boxes wider than narrow 700px pages; martial 1008px
+            # pages never trigger this, so its behaviour is unchanged).
+            if page_width > 0 and width_px > page_width:
+                width_px = float(page_width)
+                x_px = 0.0
+            if page_width > 0 and x_px + width_px > page_width:
+                width_px = max(0.0, float(page_width) - x_px)
 
             # Site typography (passed through; server merges it over defaults):
             # exact text color (black/white/...) + outline from text-shadow.
@@ -564,6 +605,29 @@ def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path):
     return ch_dir
 
 
+def _resolve_base_root() -> Path:
+    """Manga base folder WITHOUT importing the server (no cycles).
+
+    Priority: env MANGA_OUTPUT_DIR > ../config.json > ./output.
+    Stale absolute paths from another machine are ignored safely.
+    """
+    import os
+    env = (os.environ.get("MANGA_OUTPUT_DIR", "") or "").strip()
+    if env:
+        return Path(env)
+    try:
+        cfg_path = Path(__file__).parent.parent / "config.json"
+        if cfg_path.exists():
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if cfg.get("output_dir"):
+                p = Path(cfg["output_dir"])
+                if p.exists():
+                    return p
+    except Exception:
+        pass
+    return Path.cwd() / "output"
+
+
 def scrape_chapter(url: str, headless: bool = True, browser: str = "brave"):
     slug, ch_num = extract_chapter_info(url)
     if not slug:
@@ -573,7 +637,7 @@ def scrape_chapter(url: str, headless: bool = True, browser: str = "brave"):
         print(f"[!] Invalid slug: {slug!r}")
         return None
 
-    base_dir = Path.cwd() / "output" / sanitize(slug)
+    base_dir = _resolve_base_root() / sanitize(slug)
     base_dir.mkdir(parents=True, exist_ok=True)
 
     # Attempt 1: new Scrapling spider + pipeline path

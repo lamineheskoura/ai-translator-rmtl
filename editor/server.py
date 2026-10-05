@@ -160,6 +160,76 @@ def set_output_dir(payload: OutputDirPayload):
     return {"status": "ok", "output_dir": str(OUTPUT_DIR)}
 
 
+DEFAULT_EXPORT_SETTINGS: dict = {
+    "format": "webp",
+    "quality": 90,
+    "merge": True,
+    "max_height": 9000,
+    "font_scale": 1.0,
+    "line_gap": 2,
+    "force_stroke": True,
+    "stroke_w": 1.5,
+    "stroke_color": "#ffffff",
+    "bg_color": "#ffffff",
+}
+
+
+def _load_export_settings() -> dict:
+    merged = dict(DEFAULT_EXPORT_SETTINGS)
+    try:
+        if APP_CONFIG_FILE.exists():
+            cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8"))
+            saved = (cfg or {}).get("export")
+            if isinstance(saved, dict):
+                for k in merged:
+                    if k in saved and saved[k] is not None:
+                        merged[k] = saved[k]
+    except Exception:
+        pass
+    return merged
+
+
+def _save_export_settings(patch: dict) -> dict:
+    current = _load_export_settings()
+    for k in DEFAULT_EXPORT_SETTINGS:
+        if k in patch and patch[k] is not None:
+            current[k] = patch[k]
+    try:
+        cfg = {}
+        if APP_CONFIG_FILE.exists():
+            cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8")) or {}
+        cfg["export"] = current
+        APP_CONFIG_FILE.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return current
+
+
+class ExportSettingsPayload(BaseModel):
+    format: Optional[str] = None
+    quality: Optional[int] = None
+    merge: Optional[bool] = None
+    max_height: Optional[int] = None
+    font_scale: Optional[float] = None
+    line_gap: Optional[int] = None
+    force_stroke: Optional[bool] = None
+    stroke_w: Optional[float] = None
+    stroke_color: Optional[str] = None
+    bg_color: Optional[str] = None
+
+
+@app.get("/api/settings/export")
+def get_export_settings():
+    return _load_export_settings()
+
+
+@app.post("/api/settings/export")
+def save_export_settings(payload: ExportSettingsPayload):
+    patch = {k: v for k, v in payload.model_dump().items() if v is not None}
+    return _save_export_settings(patch)
+
+
 # ── Path protection ──────────────────────────────────────
 _SAFE_SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 _CHAPTER_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
@@ -281,6 +351,15 @@ def _normalize_chapter_data(data: dict):
     data["total_texts"] = total_texts
 
 
+def _chapter_sort_key(p) -> tuple:
+    """Numeric chapter sort: chapter_2 before chapter_10 (not lexicographic)."""
+    m = re.search(r"chapter_([\d.]+)", p.name if hasattr(p, "name") else str(p))
+    try:
+        return (0, float(m.group(1))) if m else (1, 0.0)
+    except Exception:
+        return (1, 0.0)
+
+
 @app.get("/api/chapters")
 def list_chapters():
     if not OUTPUT_DIR.exists():
@@ -288,7 +367,7 @@ def list_chapters():
     chapters = []
     for slug_dir in sorted(OUTPUT_DIR.iterdir()):
         if slug_dir.is_dir():
-            for ch_dir in sorted(slug_dir.iterdir()):
+            for ch_dir in sorted(slug_dir.iterdir(), key=_chapter_sort_key):
                 if ch_dir.is_dir() and (ch_dir / "chapter_data.json").exists():
                     with open(ch_dir / "chapter_data.json", "r", encoding="utf-8") as f:
                         data = json.load(f)
@@ -451,19 +530,24 @@ def export_chapter_endpoint(
     slug: str, chapter: str,
     export_format: str = Query(default="webp", alias="format"),
     export_quality: int = Query(default=90, alias="quality"),
-    export_merge: bool = Query(default=False, alias="merge"),
+    export_merge: Optional[bool] = Query(default=None, alias="merge"),
     export_max_height: int = Query(default=9000, alias="max_height"),
     export_pages: str = Query(default="", alias="pages"),
     font_scale: float = Query(default=1.0, alias="font_scale"),
     line_gap: int = Query(default=2, alias="line_gap"),
     bg_color: str = Query(default="#ffffff", alias="bg_color"),
-    force_stroke: bool = Query(default=False, alias="force_stroke"),
+    force_stroke: Optional[bool] = Query(default=None, alias="force_stroke"),
     export_stroke_w: float = Query(default=1.5, alias="export_stroke_w"),
     export_stroke_color: str = Query(default="#ffffff", alias="export_stroke_color"),
 ):
     ch_dir = _chapter_dir(slug, chapter)
     export_dir = ch_dir / "exported"
     page_range = None
+    _ex_defaults = _load_export_settings()
+    if export_merge is None:
+        export_merge = bool(_ex_defaults.get("merge", True))
+    if force_stroke is None:
+        force_stroke = bool(_ex_defaults.get("force_stroke", True))
     if export_pages:
         try:
             parts = [int(x.strip()) for x in export_pages.split(",") if x.strip()]
@@ -521,7 +605,7 @@ def download_zip(slug: str, chapter: str,
     buf = io.BytesIO()
     exts = {".png", ".jpg", ".jpeg", ".webp"}
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in sorted(export_dir.iterdir()):
+        for f in sorted(export_dir.iterdir(), key=_chapter_sort_key):
             if f.suffix.lower() in exts:
                 zf.write(f, arcname=f.name)
     buf.seek(0)
@@ -955,7 +1039,11 @@ batch_jobs: dict[str, dict] = {}
 batches: dict[str, dict] = {}
 batch_lock = threading.Lock()
 _batch_queue: queue.Queue = queue.Queue()
-QUEUE_FILE = OUTPUT_DIR / ".queue.json"
+
+
+def _queue_file() -> Path:
+    """Queue path follows the CURRENT output dir (not import-time one)."""
+    return OUTPUT_DIR / ".queue.json"
 
 
 def _save_queue():
@@ -963,15 +1051,15 @@ def _save_queue():
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         with batch_lock:
             payload = {"batches": batches, "jobs": batch_jobs}
-        _atomic_json_dump(QUEUE_FILE, payload)
+        _atomic_json_dump(_queue_file(), payload)
     except Exception:
         pass
 
 
 def _load_queue():
     try:
-        if QUEUE_FILE.exists():
-            with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+        if _queue_file().exists():
+            with open(_queue_file(), "r", encoding="utf-8") as f:
                 saved = json.load(f)
             with batch_lock:
                 for bid, b in (saved.get("batches") or {}).items():
@@ -1158,17 +1246,29 @@ def _batch_worker():
                     batch_jobs[job_id]["status"] = "cancelled"
                     _save_queue()
                     continue
-            # --- phase 3: optional export ---
+            # --- phase 3: optional export (full prefs = saved defaults + job) ---
             auto_ex = job.get("auto_export")
             if auto_ex:
                 try:
-                    ex_fmt = auto_ex.get("format", auto_ex.get("fmt", "webp"))
-                    ex_quality = int(auto_ex.get("quality", 90))
-                    ex_merge = bool(auto_ex.get("merge", False))
-                    ex_max_h = int(auto_ex.get("max_height", auto_ex.get("maxHeight", 9000)))
+                    ex = {**_load_export_settings(), **auto_ex}
+                    ex_fmt = ex.get("format", ex.get("fmt", "webp"))
+                    ex_quality = int(ex.get("quality", 90))
+                    ex_merge = bool(ex.get("merge", True))
+                    ex_max_h = int(ex.get("max_height", ex.get("maxHeight", 9000)))
+                    ex_font_scale = float(ex.get("font_scale", 1.0))
+                    ex_line_gap = int(ex.get("line_gap", 2))
+                    ex_bg = _parse_color(ex.get("bg_color", "#ffffff"))
+                    ex_force = bool(ex.get("force_stroke", True))
+                    ex_sw = float(ex.get("stroke_w", ex.get("export_stroke_w", 1.5)))
+                    ex_sc = _parse_color(ex.get("stroke_color",
+                                                ex.get("export_stroke_color", "#ffffff")))
                     export_dir = ch_dir / "exported"
                     export_chapter(ch_dir, export_dir, fmt=ex_fmt, quality=ex_quality,
-                                   merge=ex_merge, max_height=ex_max_h)
+                                   merge=ex_merge, max_height=ex_max_h,
+                                   font_scale=ex_font_scale, line_gap=ex_line_gap,
+                                   bg_color=ex_bg, force_stroke=ex_force,
+                                   export_stroke_width=ex_sw,
+                                   export_stroke_color=ex_sc)
                     with batch_lock:
                         batch_jobs[job_id]["status"] = "exported"
                         batch_jobs[job_id]["progress"] = 100

@@ -277,7 +277,7 @@ function getTextMeasurer() {
     el.style.wordBreak = 'break-word';
     el.style.overflowWrap = 'break-word';
     el.style.boxSizing = 'border-box';
-    el.style.padding = '4px';
+    el.style.padding = '6px';
     document.body.appendChild(el);
   }
   return el;
@@ -777,7 +777,7 @@ function createTextOverlay(t, parentBlock) {
   el.style.justifyContent = align === 'left' ? 'flex-start' : (align === 'right' ? 'flex-end' : 'center');
   el.style.textAlign = align;
   setOverlayStrokeStyles(el, strokeEnabled, strokeWidth, strokeColor);
-  el.style.padding = '4px';
+  el.style.padding = '6px';
   el.style.boxSizing = 'border-box';
   el.style.lineHeight = String(lineHeight);
   el.style.wordBreak = 'break-word';
@@ -1612,6 +1612,7 @@ function showScrapeModal() {
   const bs = document.getElementById('batch-status');
   if (bs) { bs.classList.add('hidden'); bs.textContent = ''; }
   loadScrapeProviders();
+  try { loadAutoModePrefs(); } catch (e) {}
 }
 function hideScrapeModal() {
   document.getElementById('scrape-modal').classList.add('hidden');
@@ -1668,6 +1669,35 @@ function getScrapeAutoTranslate() {
   return { provider_id: pid, model };
 }
 
+// ─── AUTO MODE (scrape-modal panel + localStorage) ───────
+const autoModePrefsKey = 'manga-auto-mode-v1';
+function getAutoModePrefs() {
+  const v = (id, def) => {
+    const el = document.getElementById(id);
+    return el ? !!el.checked : !!def;
+  };
+  return {
+    translate: v('automode-translate', true),
+    smartfont: v('automode-smartfont', true),
+    stroke: v('automode-stroke', true),
+    export: v('automode-export', true),
+  };
+}
+function loadAutoModePrefs() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(autoModePrefsKey) || 'null'); } catch (e) { saved = null; }
+  if (!saved) return getAutoModePrefs();
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.checked = !!val; };
+  set('automode-translate', saved.translate);
+  set('automode-smartfont', saved.smartfont);
+  set('automode-stroke', saved.stroke);
+  set('automode-export', saved.export);
+  return getAutoModePrefs();
+}
+function saveAutoModePrefs() {
+  try { localStorage.setItem(autoModePrefsKey, JSON.stringify(getAutoModePrefs())); } catch (e) {}
+}
+
 async function translateChapterViaProvider(slug, chapter) {
   const pid = document.getElementById('scrape-provider')?.value || selectedProvider;
   const model = document.getElementById('scrape-provider-model')?.value || selectedProviderModel;
@@ -1694,8 +1724,23 @@ async function startBatchScrape() {
   const countRaw = parseInt(document.getElementById('scrape-count')?.value || '1', 10) || 1;
   const headless = document.getElementById('scrape-headless')?.checked !== false;
   const browser = document.getElementById('scrape-browser')?.value || 'brave';
-  const autoT = getScrapeAutoTranslate();
-  const auto_translate = autoT ? { provider_id: autoT.provider_id, model: autoT.model } : null;
+  const autoPrefs = getAutoModePrefs();
+  try { saveAutoModePrefs(); } catch (e) {}
+  let auto_translate = null;
+  if (autoPrefs.translate) {
+    const pid = document.getElementById('scrape-provider')?.value || selectedProvider;
+    const model = document.getElementById('scrape-provider-model')?.value || selectedProviderModel;
+    const fallback = getScrapeAutoTranslate();
+    const usePid = pid || fallback?.provider_id;
+    const useModel = model || fallback?.model;
+    if (usePid && useModel) auto_translate = { provider_id: usePid, model: useModel, smart_font: !!autoPrefs.smartfont, unify_stroke: !!autoPrefs.stroke };
+  }
+  let auto_export = null;
+  if (autoPrefs.export) {
+    const q = parseInt(document.getElementById('export-quality')?.value || '90', 10) || 90;
+    const mh = parseInt(document.getElementById('export-max-height')?.value || '9000', 10) || 9000;
+    auto_export = { format: 'webp', quality: q, merge: true, max_height: mh };
+  }
   const status = document.getElementById('batch-status');
   status.classList.remove('hidden');
   status.textContent = urls.length > 0
@@ -1706,7 +1751,7 @@ async function startBatchScrape() {
       urls, headless, browser,
       start_url,
       auto_translate,
-      auto_export: null,
+      auto_export,
       delay_sec: 3,
     };
     // count يُرسل مع start_url فقط (إن كانت urls فارغة)
@@ -1736,7 +1781,7 @@ function batchJobId(j, idx) {
 }
 async function cancelBatchJob(jobId, batchId) {
   try {
-    const res = await fetch(`/api/queue/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+    const res = await fetch(`/api/queue/cancel/${encodeURIComponent(jobId)}`, { method: 'POST' });
     if (!res.ok) throw new Error((await res.text()).slice(0, 200) || 'فشل الإلغاء');
     toast(`تم إلغاء المهمة ${jobId}`, 'success');
   } catch (e) {
@@ -1745,7 +1790,7 @@ async function cancelBatchJob(jobId, batchId) {
 }
 async function retryBatchJob(jobId, batchId) {
   try {
-    const res = await fetch(`/api/queue/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
+    const res = await fetch(`/api/batch/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' });
     if (!res.ok) throw new Error((await res.text()).slice(0, 200) || 'فشل إعادة المحاولة');
     toast(`أُعيدت المهمة ${jobId} إلى الطابور`, 'success');
   } catch (e) {
@@ -2048,6 +2093,64 @@ async function autoTranslate() {
 }
 
 // ─── EXPORT MODAL ────────────────────────────────────────
+function collectExportSettings() {
+  return {
+    format: document.getElementById('export-format')?.value || 'webp',
+    quality: parseInt(document.getElementById('export-quality')?.value || '90', 10) || 90,
+    font_scale: parseFloat(document.getElementById('export-font-scale')?.value || '1.0') || 1.0,
+    line_gap: parseInt(document.getElementById('export-line-gap')?.value || '2', 10) || 0,
+    bg_color: document.getElementById('export-bg-color')?.value || '#ffffff',
+    force_stroke: !!document.getElementById('export-force-stroke')?.checked,
+    export_stroke_w: parseFloat(document.getElementById('export-stroke-w')?.value || '1.5') || 1.5,
+    export_stroke_color: document.getElementById('export-stroke-color')?.value || '#ffffff',
+    merge: !!document.getElementById('export-merge')?.checked,
+    max_height: parseInt(document.getElementById('export-max-height')?.value || '9000', 10) || 9000,
+  };
+}
+function applyExportSettings(s) {
+  if (!s) return;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.value = v; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.checked = !!v; };
+  if (s.format !== undefined) setVal('export-format', s.format);
+  if (s.quality !== undefined) setVal('export-quality', s.quality);
+  if (s.font_scale !== undefined) setVal('export-font-scale', s.font_scale);
+  if (s.line_gap !== undefined) setVal('export-line-gap', s.line_gap);
+  if (s.bg_color !== undefined) { setVal('export-bg-color', s.bg_color); setVal('export-bg-hex', s.bg_color); }
+  if (s.force_stroke !== undefined) setChk('export-force-stroke', s.force_stroke);
+  if (s.export_stroke_w !== undefined) setVal('export-stroke-w', s.export_stroke_w);
+  if (s.export_stroke_color !== undefined) { setVal('export-stroke-color', s.export_stroke_color); setVal('export-stroke-hex', s.export_stroke_color); }
+  if (s.merge !== undefined) setChk('export-merge', s.merge);
+  if (s.max_height !== undefined) setVal('export-max-height', s.max_height);
+  const qv = document.getElementById('export-quality-val');
+  if (qv) qv.textContent = document.getElementById('export-quality').value;
+  const fsv = document.getElementById('export-font-scale-val');
+  if (fsv) fsv.textContent = parseFloat(document.getElementById('export-font-scale').value || '1').toFixed(2);
+  const lgv = document.getElementById('export-line-gap-val');
+  if (lgv) lgv.textContent = document.getElementById('export-line-gap').value;
+  const swv = document.getElementById('export-stroke-w-val');
+  if (swv) swv.textContent = document.getElementById('export-stroke-w').value;
+  const mhv = document.getElementById('export-max-height-val');
+  if (mhv) mhv.textContent = document.getElementById('export-max-height').value;
+}
+async function loadExportSettings() {
+  try {
+    const res = await fetch('/api/settings/export');
+    if (!res.ok) return null;
+    const data = await res.json();
+    const s = data.settings || data.data || data;
+    applyExportSettings(s);
+    return s;
+  } catch (e) { return null; }
+}
+async function saveExportSettings() {
+  try {
+    await fetch('/api/settings/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectExportSettings()),
+    });
+  } catch (e) {}
+}
 function showExportModal() {
   if (!chapterData) { toast('افتح فصلاً أولاً', 'warning'); return; }
   document.getElementById('export-modal').classList.remove('hidden');
@@ -2060,6 +2163,7 @@ function showExportModal() {
     const totalEst = Math.round(avgH * chapterData.pages.length);
     document.getElementById('export-max-height').max = Math.max(totalEst, 9000);
   }
+  loadExportSettings().catch(() => {});
 }
 function hideExportModal() {
   document.getElementById('export-modal').classList.add('hidden');
@@ -2112,6 +2216,7 @@ async function startExport() {
     const data = await res.json();
     if (data.status === 'ok') {
       progress.textContent = `✓ تم تصدير ${data.files?.length || 0} ملف`;
+      try { await saveExportSettings(); } catch (e) {}
 
       if (data.files?.length > 0) {
         if (data.files.length === 1) {
