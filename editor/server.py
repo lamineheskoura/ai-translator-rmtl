@@ -618,6 +618,15 @@ def get_exported(slug: str, chapter: str, filename: str):
     except ValueError:
         raise HTTPException(400, "Invalid filename")
     if not file_path.exists():
+        # Backward compat: exports made before the published/ era live
+        # next to the working files in <chapter>/exported/.
+        legacy = (ch_dir / "exported" / filename).resolve()
+        try:
+            legacy.relative_to(ch_dir.resolve())
+        except ValueError:
+            raise HTTPException(400, "Invalid filename")
+        file_path = legacy
+    if not file_path.exists():
         raise HTTPException(404, "File not found")
     ext = Path(filename).suffix.lower()
     media_types = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
@@ -634,7 +643,11 @@ def download_zip(slug: str, chapter: str,
     export_dir = _resolve_export_dir(slug, chapter)
 
     if not list(export_dir.iterdir()):
-        export_chapter(ch_dir, export_dir, fmt=dl_format, quality=dl_quality, merge=dl_merge, max_height=dl_max_height)
+        legacy = ch_dir / "exported"
+        if legacy.exists() and list(legacy.iterdir()):
+            export_dir = legacy  # pre-published-era exports stay reachable
+        else:
+            export_chapter(ch_dir, export_dir, fmt=dl_format, quality=dl_quality, merge=dl_merge, max_height=dl_max_height)
 
     buf = io.BytesIO()
     exts = {".png", ".jpg", ".jpeg", ".webp"}
