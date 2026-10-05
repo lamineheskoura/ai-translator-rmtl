@@ -2398,6 +2398,10 @@ async function loadProvidersList() {
     }
   } catch(e) {
     console.error('Provider load error:', e);
+    const container = document.getElementById('providers-list');
+    if (container && !container.innerHTML.trim()) {
+      container.innerHTML = `<div style="padding:10px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; color:var(--error, #e74c3c);">تعذر تحميل قائمة المزودين من السيرفر: ${String(e.message || e)}<br>تأكد أن السيرفر يعمل بآخر نسخة ثم حدّث الصفحة (Ctrl+F5).</div>`;
+    }
   }
 }
 
