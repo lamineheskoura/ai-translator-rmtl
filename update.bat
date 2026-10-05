@@ -61,7 +61,7 @@ if "%SRC%"=="BRANCH" (
   )
   set "PKGBASE=%STAGE%\ai-translator-rmtl-main"
 ) else (
-  if not exist "%PKGBASE%\main.py" (
+  if not exist "%STAGE%\MangaAI\main.py" (
     echo [!] Package looks broken - aborting, nothing changed.
     pause & exit /b 1
   )
@@ -75,25 +75,47 @@ if "!OLDVER!"=="!NEWVER!" (
   set /p GO=
   if /i "!GO!"=="n" goto done
 )
+set "MANIFEST=%PKGBASE%\MANIFEST.txt"
+if not exist "%MANIFEST%" (
+  echo [!] New package has no MANIFEST.txt - aborting, nothing changed.
+  pause & exit /b 1
+)
 echo [*] Backing up current code to _backup-v!OLDVER! ...
 if exist "_backup-v!OLDVER!" rmdir /s /q "_backup-v!OLDVER!"
 mkdir "_backup-v!OLDVER!" >nul 2>nul
-for %%D in (editor scraper translator) do (
-  if exist "%%D" robocopy "%%D" "_backup-v!OLDVER!\%%D" /E /XD __pycache__ >nul
+for /f "tokens=1* delims= " %%A in ('findstr /b "D " "%MANIFEST%"') do (
+  if exist "%%B" robocopy "%%B" "_backup-v!OLDVER!\%%B" /E /XD __pycache__ >nul
 )
-for %%F in (main.py requirements.txt install.bat start_server.bat update.bat package.bat smoke.bat .env.example .gitignore README.md README-WORKERS.txt VERSION CONTRACTS.md) do (
-  if exist "%%F" copy /y "%%F" "_backup-v!OLDVER!\" >nul
+for /f "tokens=1* delims= " %%A in ('findstr /b "F " "%MANIFEST%"') do (
+  if exist "%%B" copy /y "%%B" "_backup-v!OLDVER!\" >nul
 )
-echo [*] Applying new code (data folders untouched) ...
-robocopy "%PKGBASE%\editor" "editor" /E /XD __pycache__ >nul
-robocopy "%PKGBASE%\scraper" "scraper" /E /XD __pycache__ >nul
-robocopy "%PKGBASE%\translator" "translator" /E /XD __pycache__ /XF providers_config.json >nul
-for %%F in (main.py requirements.txt install.bat start_server.bat update.bat package.bat smoke.bat .env.example .gitignore README.md README-WORKERS.txt VERSION CONTRACTS.md) do (
-  if exist "%PKGBASE%\%%F" copy /y "%PKGBASE%\%%F" . >nul
+echo [*] Applying new code - manifest-driven, data folders untouched ...
+for /f "tokens=1* delims= " %%A in ('findstr /b "D " "%MANIFEST%"') do (
+  if not exist "%PKGBASE%\%%B\*" (
+    echo     [!] Package missing dir %%B - skipping it, local copy kept.
+  ) else if "%%B"=="translator" (
+    robocopy "%PKGBASE%\%%B" "%%B" /MIR /XD __pycache__ /XF providers_config.json >nul
+  ) else if "%%B"=="fonts" (
+    robocopy "%PKGBASE%\%%B" "%%B" /MIR /XD __pycache__ _user /XF *.ttf *.otf >nul
+    if exist "%PKGBASE%\fonts\_user\*.ttf" copy /y "%PKGBASE%\fonts\_user\*.ttf" "fonts\_user\" >nul
+    if exist "%PKGBASE%\fonts\_user\*.otf" copy /y "%PKGBASE%\fonts\_user\*.otf" "fonts\_user\" >nul
+  ) else (
+    if not exist "%%B" mkdir "%%B" >nul 2>nul
+    robocopy "%PKGBASE%\%%B" "%%B" /MIR /XD __pycache__ >nul
+  )
 )
-REM bundled fonts: add new ones, never delete worker uploads
-if exist "%PKGBASE%\fonts\_user\*.ttf" copy /y "%PKGBASE%\fonts\_user\*.ttf" "fonts\_user\" >nul
-if exist "%PKGBASE%\fonts\_user\*.otf" copy /y "%PKGBASE%\fonts\_user\*.otf" "fonts\_user\" >nul
+for /f "tokens=1* delims= " %%A in ('findstr /b "F " "%MANIFEST%"') do (
+  if exist "%PKGBASE%\%%B" (
+    if /i "%%B"=="update.bat" (
+      copy /y "%PKGBASE%\%%B" "update.new.bat" >nul
+      set "SELFUPDATED=1"
+    ) else (
+      copy /y "%PKGBASE%\%%B" . >nul
+    )
+  )
+)
+REM /MIR above already removed local code files deleted upstream.
+REM Data is never mirrored: providers_config.json, _user uploads, output, .venv.
 echo [*] Refreshing libraries (fast, cached) ...
 if exist ".venv\Scripts\python.exe" (
   ".venv\Scripts\python.exe" -m pip install --retries 3 --timeout 60 -r requirements.txt >> "%LOG%" 2>&1
@@ -107,6 +129,10 @@ del "%ZIP%" 2>nul
 echo.
 echo [+] Updated to !NEWVER!. Your chapters, keys and settings are untouched.
 echo     Old code backup: _backup-v!OLDVER!\  (delete it when all is fine)
+if defined SELFUPDATED (
+  echo     NOTE: the updater itself changed - it is saved as update.new.bat.
+  echo     Rename it to update.bat to use the new updater next time.
+)
 echo     Now launch start_server.bat
 :done
 pause

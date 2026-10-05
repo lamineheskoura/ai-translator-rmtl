@@ -1,0 +1,25 @@
+# MangaAI code manifest — the updater syncs EXACTLY this set (v1).
+# Format: one entry per line:  D <dir>   = mirror this code dir
+#                              F <file>  = copy this file if present
+# Anything NOT listed here is NEVER touched (data, keys, chapters, venv).
+# Data exclusions inside mirrored dirs are hardcoded in update.bat:
+#   translator/providers/providers_config.json, fonts/_user uploads.
+D editor
+D scraper
+D translator
+D fonts
+F main.py
+F requirements.txt
+F install.bat
+F start_server.bat
+F update.bat
+F package.bat
+F smoke.bat
+F .env.example
+F .gitignore
+F .gitattributes
+F README.md
+F README-WORKERS.txt
+F VERSION
+F MANIFEST.txt
+F CONTRACTS.md
