@@ -559,35 +559,57 @@ function toggleWorkspaceFocus() {
 }
 
 // ─── CHAPTER SELECTOR ───────────────────────────────────
+let cachedChapters = [];
 async function loadChapterList() {
   try {
     const res = await fetch('/api/chapters');
     const data = await res.json();
-    const list = document.getElementById('chapter-list');
-    if (!data.chapters || data.chapters.length === 0) {
-      list.innerHTML = '<div class="loading-chapters">لا توجد فصول بعد. قم بتشغيل السكرابر أولاً.</div>';
-      return;
-    }
-    list.innerHTML = data.chapters.map(ch => `
-      <div class="chapter-item">
-        <div class="chapter-item-main" onclick="loadChapter('${ch.slug}','${ch.chapter}')">
-          <div>
-            <div class="chapter-item-title">${ch.title || ch.slug} — فصل ${ch.chapter}</div>
-            <div class="chapter-item-meta">${ch.total_pages} صفحة • ${ch.total_texts} نص</div>
-          </div>
-          <div style="color:var(--accent)">← فتح</div>
-        </div>
-        <div class="chapter-item-actions">
-          <button class="btn-icon" onclick="resetChapter('${ch.slug}','${ch.chapter}',event)" title="مسح الترجمة">⟳</button>
-          <button class="btn-icon btn-icon-danger" onclick="deleteChapter('${ch.slug}','${ch.chapter}',event)" title="حذف الفصل">✕</button>
-        </div>
-      </div>
-    `).join('');
+    cachedChapters = data.chapters || [];
+    renderChapterList(document.getElementById('chapter-search')?.value || '');
   } catch (e) {
     document.getElementById('chapter-list').innerHTML =
       '<div class="loading-chapters" style="color:var(--danger)">خطأ في تحميل الفصول</div>';
     console.error(e);
   }
+}
+function chapterStatusLine(ch) {
+  const total = ch.total_texts || 0;
+  const tr = ch.translated_texts || 0;
+  const pct = total > 0 ? Math.round((tr / total) * 100) : 0;
+  const bits = [`${ch.total_pages} صفحة • ${tr}/${total} مترجم`];
+  if (ch.approved_texts) bits.push(`✓ ${ch.approved_texts}`);
+  if (ch.has_exported) bits.push('مصدَّر');
+  return { text: bits.join(' • '), pct };
+}
+function renderChapterList(filter) {
+  const list = document.getElementById('chapter-list');
+  const q = (filter || '').trim();
+  const items = cachedChapters.filter(ch =>
+    !q || (ch.slug + ' ' + ch.chapter + ' ' + (ch.title || '')).includes(q));
+  if (!items.length) {
+    list.innerHTML = '<div class="loading-chapters">' +
+      (cachedChapters.length ? 'لا نتائج مطابقة للبحث.' : 'لا توجد فصول بعد. قم بتشغيل السكرابر أولاً.') + '</div>';
+    return;
+  }
+  list.innerHTML = items.map(ch => {
+    const st = chapterStatusLine(ch);
+    return `
+      <div class="chapter-item">
+        <div class="chapter-item-main" onclick="loadChapter('${ch.slug}','${ch.chapter}')">
+          <div>
+            <div class="chapter-item-title">${ch.title || ch.slug} — فصل ${ch.chapter}</div>
+            <div class="chapter-item-meta">${st.text}</div>
+            <div class="chapter-progress"><div class="chapter-progress-fill" style="width:${st.pct}%"></div></div>
+          </div>
+          <div style="color:var(--accent)">← فتح</div>
+        </div>
+        <div class="chapter-item-actions">
+          <button class="btn-icon" onclick="resetChapter('${ch.slug}','${ch.chapter}',event)" title="مسح الترجمة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-retry"/></svg></button>
+          <button class="btn-icon btn-icon-danger" onclick="deleteChapter('${ch.slug}','${ch.chapter}',event)" title="حذف الفصل"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
+        </div>
+      </div>
+    `;
+  }).join('');
 }
 
 function showChapterSelector() {
@@ -761,6 +783,11 @@ async function renderSinglePage(pageNum) {
   block.className = 'page-block';
   block.style.width = w + 'px';
   block.style.height = h + 'px';
+
+  const label = document.createElement('div');
+  label.className = 'page-label';
+  label.textContent = `صفحة ${pageNum}`;
+  block.appendChild(label);
 
   const img = document.createElement('img');
   img.src = `/api/chapter/${currentSlug}/${currentChapter}/page/${pageNum}`;
@@ -1477,20 +1504,32 @@ function setTool(tool) {
 function getCurrentZoom() { return currentZoom || 1; }
 function setZoom(level) {
   level = typeof level === 'string' ? parseFloat(level) : level;
-  level = Math.max(0.5, Math.min(2, level));
+  level = Math.max(0.25, Math.min(3, level));
   currentZoom = level;
   const wrapper = document.getElementById('canvas-wrapper');
   wrapper.style.transform = `scale(${level})`;
   wrapper.style.transformOrigin = 'top center';
   const zoomSel = document.getElementById('zoom-select');
-  if (zoomSel) zoomSel.value = level;
+  if (zoomSel) {
+    const ladder = [0.25, 0.5, 0.75, 1, 1.5, 2, 3];
+    const nearest = ladder.reduce((a, b) => Math.abs(b - level) < Math.abs(a - level) ? b : a);
+    zoomSel.value = String(nearest);
+  }
+}
+
+const ZOOM_LADDER = [0.25, 0.5, 0.75, 1, 1.5, 2, 3];
+function zoomStep(dir) {
+  const cur = getCurrentZoom();
+  let idx = ZOOM_LADDER.reduce((bi, v, i) => Math.abs(v - cur) < Math.abs(ZOOM_LADDER[bi] - cur) ? i : bi, 0);
+  idx = Math.max(0, Math.min(ZOOM_LADDER.length - 1, idx + dir));
+  setZoom(ZOOM_LADDER[idx]);
 }
 
 function zoomIn() {
-  setZoom(getCurrentZoom() + 0.1);
+  zoomStep(1);
 }
 function zoomOut() {
-  setZoom(getCurrentZoom() - 0.1);
+  zoomStep(-1);
 }
 function zoomFit() {
   const container = document.getElementById('canvas-container');
@@ -1498,16 +1537,39 @@ function zoomFit() {
   if (!pageBlocks.length) return;
   const block = pageBlocks[0];
   const w = block.offsetWidth || 800;
-  const fit = Math.min(cw / w, 1);
+  const fit = Math.max(0.25, Math.min(3, cw / w));
   setZoom(fit);
+  toast(`ملاءمة الشاشة: ${Math.round(fit * 100)}%`, 'info');
 }
 
 // ─── EXPORT ─────────────────────────────────────────────
+async function getSavedExportParams() {
+  // One-click exports use the SAME persisted settings as the modal
+  // (merge/stroke/quality...), never silent server defaults.
+  let s = {};
+  try {
+    const r = await fetch('/api/settings/export');
+    if (r.ok) s = await r.json();
+  } catch (e) {}
+  const q = new URLSearchParams();
+  q.set('format', s.format || 'webp');
+  q.set('quality', s.quality ?? 90);
+  q.set('merge', s.merge ?? true);
+  q.set('max_height', s.max_height ?? 9000);
+  q.set('font_scale', s.font_scale ?? 1.0);
+  q.set('line_gap', s.line_gap ?? 2);
+  q.set('bg_color', s.bg_color || '#ffffff');
+  q.set('force_stroke', s.force_stroke ?? true);
+  q.set('export_stroke_w', s.stroke_w ?? 1.5);
+  q.set('export_stroke_color', s.stroke_color || '#ffffff');
+  return q;
+}
 async function exportAll() {
   const saved = await saveAll();
   if (!saved) return;
   try {
-    const res = await fetch(`/api/chapter/${currentSlug}/${currentChapter}/export`, {
+    const q = await getSavedExportParams();
+    const res = await fetch(`/api/chapter/${currentSlug}/${currentChapter}/export?${q.toString()}`, {
       method: 'POST',
     });
     const data = await res.json();
@@ -1525,7 +1587,8 @@ async function downloadZip() {
   const saved = await saveAll();
   if (!saved) return;
   try {
-    const res = await fetch(`/api/chapter/${currentSlug}/${currentChapter}/export`, {
+    const q = await getSavedExportParams();
+    const res = await fetch(`/api/chapter/${currentSlug}/${currentChapter}/export?${q.toString()}`, {
       method: 'POST',
     });
     const data = await res.json();

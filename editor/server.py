@@ -402,15 +402,33 @@ def list_chapters():
         if slug_dir.is_dir():
             for ch_dir in sorted(slug_dir.iterdir(), key=_chapter_sort_key):
                 if ch_dir.is_dir() and (ch_dir / "chapter_data.json").exists():
-                    with open(ch_dir / "chapter_data.json", "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    try:
+                        with open(ch_dir / "chapter_data.json", "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
+                        continue
+                    _n_tr = _n_ap = _n_tx = 0
+                    for _pg in data.get("pages", []) or []:
+                        for _t in _pg.get("texts", []) or []:
+                            _n_tx += 1
+                            if (_t.get("arabic_text") or "").strip():
+                                _n_tr += 1
+                            if _t.get("approved") == "approved":
+                                _n_ap += 1
+                    try:
+                        _has_exp = any((ch_dir / "exported").glob("*")) if (ch_dir / "exported").exists() else False
+                    except Exception:
+                        _has_exp = False
                     chapters.append({
                         "slug": data.get("slug", slug_dir.name),
                         "chapter": data.get("chapter", ch_dir.name),
                         "title": data.get("title", ""),
                         "path": str(ch_dir),
                         "total_pages": data.get("total_images", 0),
-                        "total_texts": data.get("total_texts", 0),
+                        "total_texts": data.get("total_texts", _n_tx),
+                        "translated_texts": _n_tr,
+                        "approved_texts": _n_ap,
+                        "has_exported": bool(_has_exp),
                     })
     return {"chapters": chapters}
 
