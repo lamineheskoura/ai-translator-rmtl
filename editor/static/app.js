@@ -2037,8 +2037,35 @@ async function translateMissingOnce() {
   return data;
 }
 
-async function retryTranslate() {
+async function refetchTexts() {
+  // Slow-network saver: re-fetch overlay texts+geometry only.
+  // Images come from local cache; translations/styles are restored by id.
   if (!chapterData) { toast('افتح فصلاً أولاً', 'warning'); return; }
+  if (!confirm('إعادة جلب النصوص من الموقع؟ (الترجمة الحالية محفوظة، الصور لن تُحمّل مجدداً)')) return;
+  toast('جاري جلب النصوص... (قد يأخذ دقيقة)', 'info', 90000);
+  try {
+    const res = await fetch(
+      `/api/chapter/${currentSlug}/${currentChapter}/refetch-texts`,
+      { method: 'POST' }
+    );
+    const data = await res.json();
+    if (data.status === 'ok') {
+      toast(`تم: ${data.found} نصاً، استُعيدت ترجمة ${data.restored}`, 'success');
+      const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
+      chapterData = await res2.json();
+      autoFittedKey = '';
+      if (viewMode === 'single') await renderSinglePage(currentPage);
+      else await renderWebtoon();
+      autoFitOnceForChapter();
+    } else {
+      toast('فشل الجلب: ' + (data.detail || JSON.stringify(data)), 'error');
+    }
+  } catch (e) {
+    toast('خطأ في الجلب (نت بطيء؟ أعد المحاولة): ' + e.message, 'error');
+  }
+}
+
+async function retryTranslate() {  if (!chapterData) { toast('افتح فصلاً أولاً', 'warning'); return; }
   if (!selectedProvider || !selectedProviderModel) {
     toast('اختر مزود الترجمة والنموذج من زر API أولاً', 'warning');
     showProviderModal();

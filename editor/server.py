@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from .exporter import get_available_fonts, export_chapter, _parse_color, autofit_chapter_boxes
+from .exporter import get_available_fonts, export_chapter, _parse_color, autofit_chapter_boxes, has_any_font
 from translator.providers import (
     get_providers_public,
     get_provider,
@@ -575,6 +575,9 @@ def export_chapter_endpoint(
 ):
     ch_dir = _chapter_dir(slug, chapter)
     export_dir = _resolve_export_dir(slug, chapter)
+    if not has_any_font():
+        raise HTTPException(
+            400, "لا يوجد أي خط صالح (ارفع خطاً عربياً من زر F+ في المحرر).")
     page_range = None
     _ex_defaults = _load_export_settings()
     if export_merge is None:
@@ -914,6 +917,56 @@ def delete_chapter(slug: str, chapter: str):
     import shutil
     shutil.rmtree(str(ch_dir), ignore_errors=True)
     return {"status": "deleted", "slug": slug, "chapter": chapter}
+
+
+@app.post("/api/chapter/{slug}/{chapter}/refetch-texts")
+def refetch_texts(slug: str, chapter: str):
+    """Re-fetch ONLY overlay texts (geometry+source text) for slow networks.
+
+    Images are cached on disk so nothing big re-downloads. Existing
+    translations, styles and review flags are restored by bubble id.
+    """
+    from scraper.coordinator import scrape_chapter
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    with open(json_path, "r", encoding="utf-8") as f:
+        old = json.load(f)
+    url = (old.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "No source URL stored for this chapter")
+    saved: dict = {}
+    for page in old.get("pages", []):
+        for t in page.get("texts", []) or []:
+            if t.get("id"):
+                saved[t["id"]] = {
+                    "arabic_text": t.get("arabic_text", "") or "",
+                    "style": t.get("style", {}) or {},
+                    "approved": t.get("approved", ""),
+                }
+    new_dir = scrape_chapter(url)
+    if not new_dir:
+        raise HTTPException(502, "فشل إعادة الجلب (إنترنت بطيء؟ أعد المحاولة)")
+    with _file_transaction(json_path) as data:
+        restored = 0
+        for page in data.get("pages", []):
+            for t in page.get("texts", []) or []:
+                s = saved.get(t.get("id", ""))
+                if s:
+                    if s["arabic_text"] and not t.get("arabic_text"):
+                        t["arabic_text"] = s["arabic_text"]
+                        restored += 1
+                    if s["style"]:
+                        t["style"] = {**(t.get("style", {}) or {}), **s["style"]}
+                    if s["approved"]:
+                        t["approved"] = s["approved"]
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    found = sum(len(p.get("texts", []) or []) for p in data.get("pages", []))
+    return {"status": "ok", "slug": slug, "chapter": chapter,
+            "found": found, "restored": restored,
+            "kept_translations": len(saved)}
 
 
 @app.post("/api/chapter/{slug}/{chapter}/reset")

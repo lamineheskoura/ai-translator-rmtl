@@ -120,11 +120,27 @@ def _pick_font_path(font_name: str, text: str) -> Optional[str]:
     Latin-only -> Arial-like font with site-like metrics
     (Hayah's Latin glyphs are ~28% narrower than the site font)."""
     if _has_arabic(text):
-        return find_font_path(font_name)
+        p = find_font_path(font_name)
+        if p:
+            return p
+        # Requested Arabic font missing (e.g. fresh GitHub clone):
+        # use ANY available font rather than dropping the text.
+        for f in get_available_fonts():
+            if Path(f["path"]).exists():
+                print(f"   [i] Font '{font_name}' missing, using '{f['name']}' instead.")
+                return f["path"]
+        return None
     for cand in LATIN_FONT_CANDIDATES:
         if Path(cand).exists():
             return cand
     return find_font_path(font_name)
+
+
+def has_any_font() -> bool:
+    """True if at least one usable font file exists (bundled/user/system)."""
+    if get_available_fonts():
+        return True
+    return any(Path(c).exists() for c in LATIN_FONT_CANDIDATES)
 
 
 def _wrap_lines(draw, text: str, font, max_w: float) -> list[str]:
