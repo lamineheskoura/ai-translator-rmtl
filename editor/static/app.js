@@ -331,18 +331,38 @@ function getTextMeasurer() {
   return el;
 }
 
-function measureTextFit(text, fontFamily, fontSize, lineHeight, boxWidth) {
+// Adaptive padding mirrors the exporter (TEXT_PADDING logic): full 6px
+// only when the box affords it, so small boxes keep every pixel for glyphs.
+function fitPadding(w, h) {
+  const px = Math.min(6, Math.max(2, (parseFloat(w) || 200) * 0.02));
+  const py = Math.min(6, Math.max(2, (parseFloat(h) || 60) * 0.10));
+  return [px, py];
+}
+
+function measureTextFit(text, fontFamily, fontSize, lineHeight, boxWidth, boxHeight) {
   const measurer = getTextMeasurer();
   measurer.style.width = Math.max(20, boxWidth) + 'px';
   measurer.style.fontFamily = fontFamily;
   measurer.style.fontSize = fontSize + 'px';
   measurer.style.lineHeight = String(lineHeight);
+  const pad = fitPadding(boxWidth, boxHeight || 200);
+  measurer.style.padding = pad[1] + 'px ' + pad[0] + 'px';
   measurer.textContent = text && text.trim() ? text : 'نص';
 
   const h = measurer.scrollHeight;
   const w = Math.min(measurer.scrollWidth, Math.max(20, boxWidth));
   const estimatedLineCount = Math.max(1, Math.round(h / Math.max(1, fontSize * lineHeight)));
   return { width: w, height: h, lineCount: estimatedLineCount };
+}
+
+// Box-area starting size: s = 0.6 * sqrt(boxArea / chars), clamped.
+// Calibrated: 975x233 narration with ~280 Arabic chars -> ~17px (site size).
+function areaGuessSize(text, boxW, boxH) {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+  const n = Math.max(1, clean.length);
+  const area = Math.max(400, (parseFloat(boxW) || 200) * (parseFloat(boxH) || 60));
+  const s = 0.6 * Math.sqrt(area / n);
+  return Math.max(8, Math.min(120, Math.round(s)));
 }
 
 // Deterministic smart size from box + char count (no DOM needed):
@@ -360,8 +380,9 @@ function estimateSmartSize(text, boxW, boxH, lineHeight) {
 }
 
 function computeSmartFontSize(t, allowGrow = false) {
-  // Site-faithful by default (shrink-only from current size).
-  // allowGrow (manual smart button) also grows toward the math best size.
+  // Box-aware smart size: start from max(current, area-guess) so short
+  // texts in big bubbles grow to fill, long texts shrink to fit.
+  // Manual smart button may additionally grow step-by-step to the max fit.
   const text = (t.arabic_text || t.original_text || '').trim();
   const cur = Math.max(8, Math.min(200, parseInt(t.style?.font_size || t.font_size_px || 45, 10) || 45));
   if (!text) return cur;
@@ -373,13 +394,14 @@ function computeSmartFontSize(t, allowGrow = false) {
   const fitHeight = boxHeight * 0.96;
   const fitWidth = boxWidth * 0.96;
   const det = estimateSmartSize(text, boxWidth, boxHeight, lineHeight);
+  const area = areaGuessSize(text, boxWidth, boxHeight);
 
   const fits = (size) => {
-    const metrics = measureTextFit(text, fontFamily, size, lineHeight, boxWidth);
+    const metrics = measureTextFit(text, fontFamily, size, lineHeight, boxWidth, boxHeight);
     return metrics.height <= fitHeight && metrics.width <= fitWidth;
   };
 
-  let size = allowGrow ? Math.min(120, Math.max(cur, det)) : cur;
+  let size = Math.min(120, Math.max(cur, det, area));
   if (allowGrow) {
     // grow while it fits (best real size for the bubble)
     while (size < 120) {
@@ -389,14 +411,14 @@ function computeSmartFontSize(t, allowGrow = false) {
     }
   }
   while (size > 8 && !fits(size)) size--;
-  if (size <= 8 && det >= 14) return det; // DOM measure suspect — trust math
+  if (size <= 8 && Math.max(det, area) >= 14) return Math.max(det, area); // DOM suspect — trust math
   return Math.max(8, size);
 }
 
-// Auto-fit every rendered overlay after load/translation: shrink ONLY
-// overflowing TRANSLATED texts so each box "takes its size".
+// Auto-fit every rendered overlay after load/translation: box-aware fill.
+// Short texts grow toward the bubble, long ones shrink to fit.
 // Untranslated (English) texts are NEVER touched: the source site proves
-// they fit at site size. Never enlarges.
+// they fit at site size.
 function autoFitOverflows() {
   if (!chapterData) return 0;
   let fixed = 0;
@@ -822,7 +844,8 @@ function createTextOverlay(t, parentBlock) {
   el.style.justifyContent = align === 'left' ? 'flex-start' : (align === 'right' ? 'flex-end' : 'center');
   el.style.textAlign = align;
   setOverlayStrokeStyles(el, strokeEnabled, strokeWidth, strokeColor);
-  el.style.padding = '6px';
+  const _pad = fitPadding(t.width, t.height);
+  el.style.padding = _pad[1] + 'px ' + _pad[0] + 'px';
   el.style.boxSizing = 'border-box';
   el.style.lineHeight = String(lineHeight);
   el.style.wordBreak = 'break-word';

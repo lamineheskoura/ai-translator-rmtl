@@ -287,9 +287,19 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             pad_x = min(6.0, max(2.0, w * 0.02))
             pad_y = min(6.0, max(2.0, h * 0.10))
             max_w, max_h = max(1, w - pad_x * 2), max(1, h - pad_y * 2)
+            # Box-aware start: short text in a big bubble grows toward fill
+            # instead of sitting tiny at site size.
+            nch = max(1, len(" ".join(arabic.split())))
+            area_start = max(8, min(120, round(
+                0.6 * ((max(w * h, 400.0) / nch) ** 0.5))))
+            start_size = min(120, max(site_size, area_start))
             fitted, _, _, _, _, _, _ = measure_fitted(
-                draw, arabic, font_path, site_size, max_w, max_h, lh, line_gap)
-            if fitted >= site_size:
+                draw, arabic, font_path, start_size, max_w, max_h, lh, line_gap)
+            if fitted >= start_size:
+                if start_size > site_size:
+                    style["font_size"] = int(start_size)
+                    t["font_size_px"] = float(start_size)
+                    t["style"] = style
                 kept += 1
                 continue
             # Grow the box downward before touching the font size.
@@ -312,8 +322,8 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 max_h = max(1, h - pad_y * 2)
                 grown += 1
                 fitted, _, _, _, _, _, _ = measure_fitted(
-                    draw, arabic, font_path, site_size, max_w, max_h, lh, line_gap)
-            if fitted < site_size:
+                    draw, arabic, font_path, start_size, max_w, max_h, lh, line_gap)
+            if fitted < start_size:
                 shrunk += 1
             else:
                 kept += 1
