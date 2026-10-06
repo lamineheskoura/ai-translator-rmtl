@@ -29,13 +29,13 @@
       <button class="menu-btn" onclick="showExportModal()" title="تصدير الصفحات">تصدير</button>
       <span class="menubar-sep" aria-hidden="true"></span>
       <button class="menu-btn" onclick="autoTranslate()" title="ترجمة آلية عبر خدمات الترجمة">ترجمة تلقائية</button>
-      <button class="menu-btn" onclick="retryTranslate()" title="إعادة ترجمة النصوص الفاشلة/الفارغة فقط"><span aria-hidden="true">🔁</span> إعادة الترجمة</button>
-      <button class="menu-btn" onclick="refetchTexts()" title="إعادة جلب النصوص فقط من الموقع (الصور مخزنة، الترجمة محفوظة)"><span aria-hidden="true">🔄</span> نصوص</button>
+      <button class="menu-btn" onclick="retryTranslate()" title="إعادة ترجمة النصوص الفاشلة/الفارغة فقط"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-retry"/></svg> إعادة الترجمة</button>
+      <button class="menu-btn" onclick="refetchTexts()" title="إعادة جلب النصوص فقط من الموقع (الصور مخزنة، الترجمة محفوظة)"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-text"/></svg> نصوص</button>
       <button class="menu-btn" onclick="showProviderModal()" title="خدمات الترجمة عبر الإنترنت">خدمات الترجمة</button>
       <span class="menubar-sep" aria-hidden="true"></span>
       <button class="menu-btn" onclick="exportChapterText()" title="تصدير نصوص الفصل">تصدير نص</button>
       <button class="menu-btn" onclick="showTextImportModal()" title="استيراد نصوص الفصل">استيراد نص</button>
-      <button class="menu-btn" onclick="showSettingsModal()" title="الإعدادات (مجلد المانهوا)">⚙ إعدادات</button>
+      <button class="menu-btn" onclick="showSettingsModal()" title="الإعدادات (مجلد المانهوا)"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-gear"/></svg> إعدادات</button>
     </div>
     <div class="menubar-right">
       <span id="chapter-title-display" class="chapter-label" title="اسم الفصل الحالي">لا يوجد فصل مفتوح — اختر فصلاً</span>
@@ -64,23 +64,23 @@
       <div class="dock-section">
         <div class="dock-section-title">أدوات</div>
         <button class="dock-btn active" data-tool="select" onclick="setTool('select')" id="tool-select" title="تحديد النصوص">
-          <span class="dock-btn-icon">⌖</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-select"/></svg>
           <span class="dock-btn-label">تحديد</span>
         </button>
         <button class="dock-btn" data-tool="pan" onclick="setTool('pan')" id="tool-pan" title="تحريك اللوحة">
-          <span class="dock-btn-icon">✥</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-pan"/></svg>
           <span class="dock-btn-label">تحريك</span>
         </button>
         <button class="dock-btn" onclick="addNewText()" title="إضافة نص جديد">
-          <span class="dock-btn-icon">نص</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-type"/></svg>
           <span class="dock-btn-label">نص جديد</span>
         </button>
         <button class="dock-btn" onclick="deleteSelected()" title="حذف النص المحدد">
-          <span class="dock-btn-icon">⌫</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg>
           <span class="dock-btn-label">حذف النص</span>
         </button>
         <button class="dock-btn" onclick="showFontUpload()" title="رفع خط جديد">
-          <span class="dock-btn-icon">خط</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-upload"/></svg>
           <span class="dock-btn-label">إضافة خط طباعي</span>
         </button>
       </div>
@@ -88,15 +88,15 @@
       <div class="dock-section dock-section-bottom">
         <div class="dock-section-title">لوحات</div>
         <button class="dock-btn" onclick="toggleInspectorCompact()" title="تصغير لوحة الخصائص">
-          <span class="dock-btn-icon">◧</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-collapse"/></svg>
           <span class="dock-btn-label">لوحة ضيقة</span>
         </button>
         <button class="dock-btn" onclick="togglePropertiesPanel()" title="إظهار أو إخفاء لوحة الخصائص">
-          <span class="dock-btn-icon">▣</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-panel"/></svg>
           <span class="dock-btn-label">إظهار / إخفاء الخصائص</span>
         </button>
         <button class="dock-btn" onclick="toggleWorkspaceFocus()" title="وضعية تركيز الصورة">
-          <span class="dock-btn-icon">⛶</span>
+          <svg class="ic" aria-hidden="true"><use href="icons.svg#i-focus"/></svg>
           <span class="dock-btn-label">تركيز</span>
         </button>
       </div>
@@ -111,18 +111,18 @@
           </div>
         </div>
         <div class="toolbar-group" id="toolbar-pagination">
-          <button class="tool-btn" onclick="prevPage()" title="الصفحة السابقة">▶</button>
+          <button class="tool-btn" onclick="prevPage()" title="الصفحة السابقة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-chev-r"/></svg></button>
           <span id="page-indicator">1 / 1</span>
-          <button class="tool-btn" onclick="nextPage()" title="الصفحة التالية">◀</button>
+          <button class="tool-btn" onclick="nextPage()" title="الصفحة التالية"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-chev-l"/></svg></button>
           <input type="number" id="page-jump" min="1" value="1" onchange="jumpToPage(this.value)" title="رقم الصفحة" dir="ltr" inputmode="numeric">
         </div>
         <div class="toolbar-group">
           <button class="tool-btn" id="view-mode-btn" onclick="toggleViewMode()" title="تبديل إلى عرض صفحة واحدة">صفحة واحدة</button>
         </div>
         <div class="toolbar-group">
-          <button class="tool-btn" onclick="zoomIn()" title="تكبير">+</button>
-          <button class="tool-btn" onclick="zoomOut()" title="تصغير">−</button>
-          <button class="tool-btn" onclick="zoomFit()" title="ملاءمة الشاشة">⊡</button>
+          <button class="tool-btn" onclick="zoomIn()" title="تكبير"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-plus"/></svg></button>
+          <button class="tool-btn" onclick="zoomOut()" title="تصغير"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-minus"/></svg></button>
+          <button class="tool-btn" onclick="zoomFit()" title="ملاءمة الشاشة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-fit"/></svg></button>
           <select id="zoom-select" onchange="setZoom(this.value)">
             <option value="0.25">25%</option>
             <option value="0.5">50%</option>
@@ -134,8 +134,8 @@
           </select>
         </div>
         <div class="toolbar-group">
-          <button class="tool-btn" onclick="undo()" title="تراجع (Ctrl+Z)">↩</button>
-          <button class="tool-btn" onclick="redo()" title="إعادة (Ctrl+Y)">↪</button>
+          <button class="tool-btn" onclick="undo()" title="تراجع (Ctrl+Z)"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-undo"/></svg></button>
+          <button class="tool-btn" onclick="redo()" title="إعادة (Ctrl+Y)"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-redo"/></svg></button>
         </div>
         <div class="toolbar-group" id="editor-mode-group" title="وضع المحرر">
           <button class="tool-btn editor-mode-btn active" id="editor-mode-review" onclick="setEditorMode('review')" title="وضع المراجعة: تحرير بضغطة + قبول/يحتاج إصلاح">مراجعة</button>
@@ -164,8 +164,8 @@
           <strong class="inspector-heading">خصائص النص</strong>
         </div>
         <div class="inspector-actions">
-          <button class="panel-icon-btn" onclick="toggleInspectorCompact()" title="تصغير اللوحة">◧</button>
-          <button class="panel-icon-btn" onclick="togglePropertiesPanel()" title="إخفاء اللوحة">✕</button>
+          <button class="panel-icon-btn" onclick="toggleInspectorCompact()" title="تصغير اللوحة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-collapse"/></svg></button>
+          <button class="panel-icon-btn" onclick="togglePropertiesPanel()" title="إخفاء اللوحة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
         </div>
       </div>
 
@@ -195,8 +195,8 @@
           </div>
           <div id="review-status-label" style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">الحالة: بانتظار المراجعة</div>
           <div style="display:flex;gap:6px;">
-            <button class="action-btn apply-page-btn" style="margin-top:0;" onclick="approveSelected('approved')">مقبول ✓</button>
-            <button class="action-btn" style="margin-top:0;border-color:var(--warning);color:var(--warning);" onclick="approveSelected('needs_fix')">يحتاج إصلاح ⚠</button>
+            <button class="action-btn apply-page-btn" style="margin-top:0;" onclick="approveSelected('approved')"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-check"/></svg> مقبول</button>
+            <button class="action-btn" style="margin-top:0;border-color:var(--warning);color:var(--warning);" onclick="approveSelected('needs_fix')"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-warn"/></svg> يحتاج إصلاح</button>
           </div>
         </div>
 
@@ -328,7 +328,7 @@
   <div class="modal-content">
     <div class="modal-header">
       <h2 id="chapter-modal-title">فتح فصل</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideChapterSelector()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideChapterSelector()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <div id="chapter-list" class="chapter-list">
@@ -347,7 +347,7 @@
   <div class="modal-content" style="max-width:550px">
     <div class="modal-header">
       <h2 id="scrape-modal-title">تحميل فصل جديد</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideScrapeModal()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideScrapeModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <label for="scrape-url" class="prop-label">رابط الفصل (تحميل واحد)</label>
@@ -387,7 +387,7 @@
         <textarea id="scrape-urls-batch" rows="4" placeholder="https://manhuarmtl.com/manga/.../chapter-1&#10;https://manhuarmtl.com/manga/.../chapter-2" style="width:100%; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px; resize:vertical;"></textarea>
       </div>
       <div style="margin-top:12px; padding:10px; background:var(--bg-input); border-radius:var(--radius); border:1px solid var(--border);">
-        <div style="font-size:12px; font-weight:600; margin-bottom:8px;">⚙ الوضع الأوتوماتيكي <span style="font-weight:400; color:var(--text-dim);">(إيقافه = تحميل فقط، بلا ترجمة ولا ضبط ولا تصدير)</span></div>
+        <div style="font-size:12px; font-weight:600; margin-bottom:8px;"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-gear"/></svg> الوضع الأوتوماتيكي <span style="font-weight:400; color:var(--text-dim);">(إيقافه = تحميل فقط، بلا ترجمة ولا ضبط ولا تصدير)</span></div>
         <div style="display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--text-dim);">
           <label style="display:flex; align-items:center; gap:6px; font-weight:700;">
             <input type="checkbox" id="automode-master" checked onchange="saveAutoModePrefs()">
@@ -429,7 +429,7 @@
   <div class="modal-content" style="max-width:500px">
     <div class="modal-header">
       <h2 id="export-modal-title">تصدير الفصل</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideExportModal()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideExportModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <div class="panel-section">
@@ -537,7 +537,7 @@
   <div class="modal-content" style="max-width:650px">
     <div class="modal-header">
       <h2 id="provider-modal-title">خدمات الترجمة عبر الإنترنت (API)</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideProviderModal()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideProviderModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <p style="color:var(--text-dim); margin-bottom:12px; font-size:12px;">
@@ -569,7 +569,7 @@
   <div class="modal-content" style="max-width:500px">
     <div class="modal-header">
       <h2 id="font-modal-title">رفع خط جديد</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideFontUpload()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideFontUpload()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <label for="font-file-input" class="prop-label">اختر ملف خط (.ttf, .otf, .ttc)</label>
@@ -588,7 +588,7 @@
   <div class="modal-content" style="max-width:600px">
     <div class="modal-header">
       <h2 id="text-export-modal-title">تصدير نص الفصل</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideTextExportModal()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideTextExportModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <label for="text-export-content" class="prop-label">انسخ النص أو حمّله كملف .txt</label>
@@ -608,7 +608,7 @@
   <div class="modal-content" style="max-width:600px">
     <div class="modal-header">
       <h2 id="text-import-modal-title">استيراد نص الفصل</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideTextImportModal()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideTextImportModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <label for="text-import-content" class="prop-label">الصق النص المُصدَّر ثم اضغط استيراد</label>
@@ -632,7 +632,7 @@
   <div class="modal-content" style="max-width:520px">
     <div class="modal-header">
       <h2 id="settings-modal-title">الإعدادات</h2>
-      <button class="modal-close" aria-label="إغلاق" onclick="hideSettingsModal()">✕</button>
+      <button class="modal-close" aria-label="إغلاق" onclick="hideSettingsModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
       <div class="panel-section">

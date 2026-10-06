@@ -235,6 +235,13 @@ function trapTabInModal(modal, e) {
 }
 
 // ─── TOAST NOTIFICATIONS ────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function toastIcon(type) {
+  const id = type === 'success' ? 'i-check' : type === 'error' ? 'i-x' : type === 'warning' ? 'i-warn' : 'i-info';
+  return `<svg class="ic ic-toast" aria-hidden="true"><use href="icons.svg#${id}"/></svg>`;
+}
 function toast(msg, type = 'info', duration = 4500) {
   let container = document.querySelector('.toast-container');
   if (!container) {
@@ -248,7 +255,7 @@ function toast(msg, type = 'info', duration = 4500) {
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
   el.setAttribute('role', type === 'error' ? 'alert' : 'status');
-  el.textContent = (type === 'success' ? '✓ ' : type === 'error' ? '✕ ' : type === 'warning' ? '⚠ ' : 'ℹ ') + msg;
+  el.innerHTML = toastIcon(type) + '<span>' + escapeHtml(msg) + '</span>';
   container.appendChild(el);
   setTimeout(() => {
     el.style.opacity = '0';
@@ -2413,12 +2420,12 @@ async function loadProvidersList() {
     modeIndicator.style.cssText = 'padding:8px 12px; margin-bottom:12px; background:var(--bg-input); border-radius:var(--radius); font-size:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;';
     if (selectedProvider) {
       modeIndicator.innerHTML = `
-        <span>🧠 وضع الترجمة: <strong style="color:var(--accent)">${selectedProvider} / ${selectedProviderModel || '—'}</strong> (عبر الإنترنت — مباشر)</span>
+        <span><svg class="ic" aria-hidden="true"><use href="icons.svg#i-translate"/></svg> وضع الترجمة: <strong style="color:var(--accent)">${selectedProvider} / ${selectedProviderModel || '—'}</strong> (عبر الإنترنت — مباشر)</span>
         <button class="action-btn" style="font-size:11px; padding:2px 8px;" onclick="clearProviderSelection()">إلغاء الاختيار</button>
       `;
     } else {
       modeIndicator.innerHTML = `
-        <span>🧠 وضع الترجمة: <strong style="color:var(--warning)">اختر مزود API للترجمة المباشرة</strong></span>
+        <span><svg class="ic" aria-hidden="true"><use href="icons.svg#i-translate"/></svg> وضع الترجمة: <strong style="color:var(--warning)">اختر مزود API للترجمة المباشرة</strong></span>
       `;
     }
     container.appendChild(modeIndicator);
