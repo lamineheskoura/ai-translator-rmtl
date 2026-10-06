@@ -162,6 +162,16 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
+    // Harden: Escape يغلق أعلى مودال مفتوح أولاً (لا يحذف أي handler قائم)
+    if (e.key === 'Escape' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const open = getOpenModals();
+      if (open.length) { e.preventDefault(); closeTopModal(); return; }
+    }
+    // Distill: حبس Tab بسيط داخل أعلى مودال
+    if (e.key === 'Tab') {
+      const open = getOpenModals();
+      if (open.length && trapTabInModal(open[open.length - 1], e)) { e.preventDefault(); }
+    }
     const activeTag = (document.activeElement?.tagName || '').toUpperCase();
     const isEditing = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || document.activeElement?.isContentEditable;
     if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing) {
@@ -197,17 +207,48 @@ window.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('wheel', onFontResizeWheel, { passive: false });
 });
 
+// ─── MODAL A11Y HELPERS (إضافة فقط — لا تمس أي show/hide/API) ───
+let lastFocusedBeforeModal = null;
+function getOpenModals() {
+  return Array.from(document.querySelectorAll('.modal')).filter(m => !m.classList.contains('hidden'));
+}
+function focusFirstInModal(modal) {
+  if (!modal) return;
+  if (!lastFocusedBeforeModal) lastFocusedBeforeModal = document.activeElement;
+  const t = modal.querySelector('.modal-content input, .modal-content select, .modal-content textarea, .modal-content button:not(.modal-close)') || modal.querySelector('.modal-close');
+  if (t) try { t.focus({ preventScroll: true }); } catch (e) { try { t.focus(); } catch (_) {} }
+}
+function closeTopModal() {
+  const open = getOpenModals();
+  if (!open.length) return;
+  const top = open[open.length - 1];
+  top.classList.add('hidden');
+  if (lastFocusedBeforeModal && document.contains(lastFocusedBeforeModal)) { try { lastFocusedBeforeModal.focus(); } catch (e) {} lastFocusedBeforeModal = null; }
+}
+function trapTabInModal(modal, e) {
+  const f = Array.from(modal.querySelectorAll('button, input, select, textarea, [tabindex]')).filter(el => !el.disabled && el.offsetParent !== null);
+  if (!f.length) return false;
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { last.focus(); return true; }
+  if (!e.shiftKey && document.activeElement === last) { first.focus(); return true; }
+  return false;
+}
+
 // ─── TOAST NOTIFICATIONS ────────────────────────────────
-function toast(msg, type = 'info', duration = 3000) {
+function toast(msg, type = 'info', duration = 4500) {
   let container = document.querySelector('.toast-container');
   if (!container) {
     container = document.createElement('div');
     container.className = 'toast-container';
+    container.setAttribute('role', 'status');
+    container.setAttribute('aria-live', 'polite');
     document.body.appendChild(container);
   }
+  while (container.children.length >= 3) container.firstChild.remove();
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
-  el.textContent = msg;
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  el.textContent = (type === 'success' ? '✓ ' : type === 'error' ? '✕ ' : type === 'warning' ? '⚠ ' : 'ℹ ') + msg;
   container.appendChild(el);
   setTimeout(() => {
     el.style.opacity = '0';
@@ -220,7 +261,7 @@ function updateFontWheelResizeStatus() {
   const right = document.getElementById('status-right');
   if (!right) return;
   if (fontWheelResizeMode && selectedTextEl) {
-    right.textContent = 'Resize Mode: Ctrl+T + عجلة الماوس';
+    right.textContent = 'وضع تغيير الحجم: Ctrl+T + عجلة الماوس';
   } else {
     right.textContent = '—';
   }
@@ -522,6 +563,7 @@ async function loadChapterList() {
 
 function showChapterSelector() {
   document.getElementById('chapter-modal').classList.remove('hidden');
+  focusFirstInModal(document.getElementById('chapter-modal'));
   loadChapterList();
 }
 function hideChapterSelector() {
@@ -1109,6 +1151,7 @@ function showTextProperties(textId) {
   const align = style.align || 'center';
   document.querySelectorAll('.align-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.align === align);
+    b.setAttribute('aria-pressed', String(b.dataset.align === align));
   });
 
   const strokeEnabled = style.stroke_enabled !== false && style.stroke_enabled !== undefined;
@@ -1222,6 +1265,7 @@ function onPropChange() {
 function setAlign(align) {
   document.querySelectorAll('.align-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.align === align);
+    b.setAttribute('aria-pressed', String(b.dataset.align === align));
   });
   onPropChange();
 }
@@ -1251,9 +1295,20 @@ function syncOverlayToData(textId) {
 }
 
 // ─── SAVE ───────────────────────────────────────────────
+function setStatusLeft(text) {
+  // Preserve the status dot span (added in markup) across updates.
+  const el = document.getElementById('status-left');
+  if (!el) return;
+  el.innerHTML = '';
+  const dot = document.createElement('span');
+  dot.className = 'status-dot';
+  dot.setAttribute('aria-hidden', 'true');
+  el.appendChild(dot);
+  el.appendChild(document.createTextNode(text));
+}
 function markDirty() {
   isDirty = true;
-  document.getElementById('status-left').textContent = 'غير محفوظ';
+  setStatusLeft('غير محفوظ');
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(saveAll, 1500);
 }
@@ -1266,7 +1321,7 @@ async function saveAll() {
 
   savePromise = (async () => {
     isSaving = true;
-    document.getElementById('status-left').textContent = 'جاري الحفظ...';
+    setStatusLeft('جاري الحفظ...');
 
     try {
       for (const textId in textOverlaysById) {
@@ -1284,12 +1339,12 @@ async function saveAll() {
       }
 
       isDirty = false;
-      document.getElementById('status-left').textContent = 'تم الحفظ';
+      setStatusLeft('تم الحفظ');
       toast('تم حفظ التغييرات', 'success');
       return true;
     } catch (e) {
       console.error('Save error:', e);
-      document.getElementById('status-left').textContent = 'فشل الحفظ';
+      setStatusLeft('فشل الحفظ');
       toast('خطأ في الحفظ: ' + e.message, 'error');
       return false;
     } finally {
@@ -1527,6 +1582,7 @@ function deleteSelected() {
 
 function showFontUpload() {
   document.getElementById('font-modal').classList.remove('hidden');
+  focusFirstInModal(document.getElementById('font-modal'));
   document.getElementById('font-file-input').value = '';
   document.getElementById('font-upload-status').classList.add('hidden');
 }
@@ -1603,6 +1659,7 @@ async function uploadFont(input) {
 // ─── SCRAPE MODAL ───────────────────────────────────────
 function showScrapeModal() {
   document.getElementById('scrape-modal').classList.remove('hidden');
+  focusFirstInModal(document.getElementById('scrape-modal'));
   document.getElementById('scrape-url').value = '';
   document.getElementById('scrape-status').classList.add('hidden');
   const bs = document.getElementById('batch-status');
@@ -1999,14 +2056,16 @@ function showWelcome() {
 // (Local model management removed — translation is provider-only via API)
 async function shutdownServer() {
   if (!confirm('هل تريد إيقاف تشغيل التطبيق؟')) return;
+  if (window._shuttingDown) return; window._shuttingDown = true;
   try {
     await fetch('/api/shutdown', { method: 'POST' });
-    toast('جاري إيقاف التطبيق...', 'info');
+    toast('جاري إيقاف التطبيق...', 'info', 6000);
     setTimeout(() => {
-      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:var(--text);background:var(--bg)"><p>تم إيقاف التطبيق. يمكنك إغلاق النافذة.</p></div>';
+      document.body.innerHTML = '<div dir="rtl" style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#e8eaed;background:#1a1d23"><p>تم إيقاف التطبيق. يمكنك إغلاق النافذة.</p></div>';
     }, 1000);
   } catch (e) {
     toast('فشل إيقاف التطبيق', 'error');
+    window._shuttingDown = false;
   }
 }
 
@@ -2196,6 +2255,7 @@ async function saveExportSettings() {
 function showExportModal() {
   if (!chapterData) { toast('افتح فصلاً أولاً', 'warning'); return; }
   document.getElementById('export-modal').classList.remove('hidden');
+  focusFirstInModal(document.getElementById('export-modal'));
   document.getElementById('export-range-to').max = totalPages;
   document.getElementById('export-range-to').value = totalPages;
   document.getElementById('export-progress').classList.add('hidden');
@@ -2324,6 +2384,7 @@ let selectedProviderModel = null;
 
 function showProviderModal() {
   document.getElementById('provider-modal').classList.remove('hidden');
+  focusFirstInModal(document.getElementById('provider-modal'));
   loadProvidersList();
 }
 function hideProviderModal() {
@@ -2555,6 +2616,7 @@ async function exportChapterText() {
     lastExportedFilename = `${currentSlug}_chapter_${currentChapter}.txt`;
     document.getElementById('text-export-content').value = text;
     document.getElementById('text-export-modal').classList.remove('hidden');
+    focusFirstInModal(document.getElementById('text-export-modal'));
     toast('تم جلب النص — انسخ أو حمّل الملف', 'success');
   } catch (e) {
     toast('خطأ في تصدير النص: ' + e.message, 'error');
@@ -2586,6 +2648,7 @@ function showTextImportModal() {
   document.getElementById('text-import-content').value = '';
   document.getElementById('text-import-report').classList.add('hidden');
   document.getElementById('text-import-modal').classList.remove('hidden');
+  focusFirstInModal(document.getElementById('text-import-modal'));
 }
 function hideTextImportModal() {
   document.getElementById('text-import-modal').classList.add('hidden');
@@ -2644,6 +2707,7 @@ window.addEventListener('beforeunload', e => {
 // ─── SETTINGS ────────────────────────────────────────────
 async function showSettingsModal() {
   document.getElementById('settings-modal').classList.remove('hidden');
+  focusFirstInModal(document.getElementById('settings-modal'));
   document.getElementById('settings-status').textContent = '';
   document.getElementById('settings-export-status').textContent = '';
   try {
