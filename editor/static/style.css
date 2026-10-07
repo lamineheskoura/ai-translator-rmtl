@@ -1034,13 +1034,29 @@ body.mode-view .text-overlay.selected { border-color: var(--border-light); backg
   font-family: var(--font-mono);
 }
 #batch-status, #scrape-status { direction: ltr; text-align: left; }
-/* Background tasks drawer: always reachable, survives closed modals. */
+/* Background tasks modal rows (ui-ux-pro-max: Swiss minimalism —
+   one status chip + title + progress + max 3 actions per row). */
 #tasks-badge { border-color: var(--accent); color: var(--accent); font-weight: bold; }
-#tasks-drawer {
-  position: fixed; top: 52px; inset-inline-end: 12px; width: 340px; max-height: 60vh;
-  overflow-y: auto; background: var(--panel); border: 1px solid var(--border);
-  border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35); z-index: 900; padding: 10px 12px;
+.tasks-list { display: flex; flex-direction: column; gap: 10px; }
+.task-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; background: var(--bg-input);
 }
-.tasks-drawer-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.tasks-drawer-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
-.tasks-drawer-row .t-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-card-top { display: flex; align-items: center; gap: 8px; }
+.task-chip {
+  flex: none; font-size: 11px; font-weight: bold; padding: 2px 10px;
+  border-radius: 20px; border: 1px solid var(--accent); color: var(--accent);
+  white-space: nowrap;
+}
+.task-chip.is-paused { border-color: #d97706; color: #d97706; }
+.task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.task-progress { height: 6px; border-radius: 4px; background: var(--border); margin-top: 8px; overflow: hidden; }
+.task-progress > div { height: 100%; background: var(--accent); border-radius: 4px; transition: width .3s ease; }
+.task-actions { display: flex; gap: 8px; margin-top: 8px; }
+.task-empty { font-size: 13px; opacity: .7; text-align: center; padding: 18px 0; }
+/* Skill pre-delivery checklist: visible focus + pointer + reduced motion. */
+.modal-content button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.modal-content button { cursor: pointer; }
+@media (prefers-reduced-motion: reduce) {
+  .task-progress > div { transition: none; }
+}

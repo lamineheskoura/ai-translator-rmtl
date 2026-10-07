@@ -40,18 +40,26 @@
     <div class="menubar-right">
       <span id="chapter-title-display" class="chapter-label" title="اسم الفصل الحالي">لا يوجد فصل مفتوح — اختر فصلاً</span>
       <span class="menubar-sep" aria-hidden="true"></span>
-      <button id="tasks-badge" class="menu-btn hidden" onclick="toggleTasksDrawer()" title="مهام جارية في الخلفية (اضغط للعرض/الإلغاء)">مهام <span id="tasks-badge-count">0</span></button>
+      <button id="tasks-badge" class="menu-btn hidden" onclick="showTasksModal()" title="مهام جارية في الخلفية (اضغط للعرض/الإلغاء)">مهام <span id="tasks-badge-count">0</span></button>
       <button class="menu-btn menu-btn-danger" onclick="shutdownServer()" title="إيقاف التطبيق">إيقاف</button>
     </div>
   </header>
 
-  <!-- ===== BACKGROUND TASKS DRAWER (persistent, outside modals) ===== -->
-  <div id="tasks-drawer" class="hidden">
-    <div class="tasks-drawer-head">
-      <strong>المهام الجارية</strong>
-      <button class="menu-btn" onclick="toggleTasksDrawer()" title="إغلاق">✕</button>
+  <!-- ===== BACKGROUND TASKS MODAL (centered, same system as all modals) ===== -->
+  <div id="tasks-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tasks-modal-title">
+    <div class="modal-backdrop" onclick="hideTasksModal()"></div>
+    <div class="modal-content" style="max-width:560px">
+      <div class="modal-header">
+        <h2 id="tasks-modal-title">المهام الجارية</h2>
+        <button class="modal-close" aria-label="إغلاق" onclick="hideTasksModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div id="tasks-modal-items" class="tasks-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn" onclick="hideTasksModal()">إغلاق</button>
+      </div>
     </div>
-    <div id="tasks-drawer-items"></div>
   </div>
 
   <!-- ===== DOWNLOAD QUEUE ===== -->

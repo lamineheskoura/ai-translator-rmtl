@@ -19,3 +19,4 @@ server_*.txt
 fonts/_user/*
 !fonts/_user/.gitkeep
 .DS_Store
+.opencode/

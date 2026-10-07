@@ -417,9 +417,15 @@ def list_chapters():
         return {"chapters": []}
     chapters = []
     for slug_dir in sorted(OUTPUT_DIR.iterdir()):
-        if slug_dir.is_dir():
-            for ch_dir in sorted(slug_dir.iterdir(), key=_chapter_sort_key):
-                if ch_dir.is_dir() and (ch_dir / "chapter_data.json").exists():
+        # Skip hidden/system dirs (e.g. output/.trash from chapter deletes)
+        # — otherwise trashed chapters haunt the list as undeletable
+        # phantoms (their real dir is gone -> every action 404s).
+        if not slug_dir.is_dir() or slug_dir.name.startswith("."):
+            continue
+        for ch_dir in sorted(slug_dir.iterdir(), key=_chapter_sort_key):
+            if ch_dir.name.startswith("."):
+                continue
+            if ch_dir.is_dir() and (ch_dir / "chapter_data.json").exists():
                     try:
                         with open(ch_dir / "chapter_data.json", "r", encoding="utf-8") as f:
                             data = json.load(f)
@@ -1027,6 +1033,29 @@ def delete_chapter(slug: str, chapter: str):
         shutil.move(str(ch_dir), str(dest))
         return {"status": "deleted", "slug": slug, "chapter": chapter,
                 "trash": dest.name}
+    except Exception as e:
+        raise HTTPException(500, f"Delete failed: {e}")
+
+
+@app.delete("/api/series/{slug}")
+def delete_series(slug: str):
+    """Move a whole series (all its chapters) to output/.trash."""
+    _safe_slug(slug)
+    base = OUTPUT_DIR.resolve()
+    slug_dir = (base / slug).resolve()
+    try:
+        slug_dir.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "Invalid series path")
+    if not slug_dir.exists() or not slug_dir.is_dir():
+        raise HTTPException(404, f"Series not found: {slug}")
+    import time as _time
+    try:
+        trash = OUTPUT_DIR / ".trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        dest = trash / f"SERIES__{slug}__{int(_time.time())}"
+        shutil.move(str(slug_dir), str(dest))
+        return {"status": "deleted", "slug": slug, "trash": dest.name}
     except Exception as e:
         raise HTTPException(500, f"Delete failed: {e}")
 

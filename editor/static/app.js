@@ -662,6 +662,7 @@ function renderChapterList(filter) {
         <div class="chapter-item-actions">
           <button class="btn-icon" onclick="resetChapter('${slug}','${chap}',event)" title="مسح الترجمة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-retry"/></svg></button>
           <button class="btn-icon btn-icon-danger" onclick="deleteChapter('${slug}','${chap}',event)" title="حذف الفصل"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
+          <button class="btn-icon btn-icon-danger" onclick="deleteSeries('${slug}',event)" title="حذف السلسلة كاملة (كل الفصول)"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
         </div>
       </div>
     `;
@@ -687,6 +688,23 @@ async function deleteChapter(slug, chapter, event) {
     loadChapterList();
   } catch (e) {
     toast('خطأ في الحذف: ' + e.message, 'error', 4000);
+  }
+}
+
+async function deleteSeries(slug, event) {
+  if (event) event.stopPropagation();
+  if (!confirm(`هل أنت متأكد من حذف السلسلة "${slug}" كاملة بكل فصولها؟ (تنتقل لسلة المهملات)`)) return;
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      let detail = 'خطأ';
+      try { detail = (await res.json()).detail || detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    toast(`تم حذف السلسلة ${slug}`, 'success', 3000);
+    loadChapterList();
+  } catch (e) {
+    toast('خطأ في حذف السلسلة: ' + e.message, 'error', 4000);
   }
 }
 
@@ -2065,9 +2083,12 @@ async function resumeBatchJob(jobId) {
   }
   refreshTasksDrawer();
 }
-function toggleTasksDrawer() {
-  document.getElementById('tasks-drawer').classList.toggle('hidden');
-  refreshTasksDrawer();
+function showTasksModal() {
+  document.getElementById('tasks-modal').classList.remove('hidden');
+  refreshTasksModal();
+}
+function hideTasksModal() {
+  document.getElementById('tasks-modal').classList.add('hidden');
 }
 async function pollScrapeTask(taskId) {
   // Re-attach to a running single scrape (modal was closed / page reloaded).
@@ -2099,12 +2120,20 @@ function reattachBatch(batchId) {
   pollBatchStatus(batchId);
 }
 const TASK_ACTIVE_Q = new Set(['queued', 'paused', 'scraping', 'translating']);
-async function refreshTasksDrawer() {
+const TASK_AR = { queued: 'في الانتظار', paused: 'متوقفة', scraping: 'تحميل', translating: 'ترجمة', started: 'بدأ' };
+function taskCard({ chip, chipCls, title, progress, actions }) {
+  return `<div class="task-card"><div class="task-card-top">`
+    + `<span class="task-chip${chipCls ? ' ' + chipCls : ''}">${escHtml(chip)}</span>`
+    + `<span class="task-title" title="${escHtml(title)}">${escHtml(title)}</span></div>`
+    + `<div class="task-progress"><div style="width:${Math.max(0, Math.min(100, progress || 0))}%"></div></div>`
+    + `<div class="task-actions">${actions}</div></div>`;
+}
+async function refreshTasksModal() {
   const badge = document.getElementById('tasks-badge');
   const count = document.getElementById('tasks-badge-count');
-  const box = document.getElementById('tasks-drawer-items');
+  const box = document.getElementById('tasks-modal-items');
   if (!badge || !box) return;
-  let rows = [];
+  let cards = [];
   try {
     const [qres, sres] = await Promise.all([
       fetch('/api/queue').then(r => r.ok ? r.json() : { jobs: [] }).catch(() => ({ jobs: [] })),
@@ -2113,36 +2142,34 @@ async function refreshTasksDrawer() {
     for (const j of (qres.jobs || [])) {
       if (!TASK_ACTIVE_Q.has(j.status)) continue;
       const jid = j.job_id || j.id;
-      const label = `دفعة: ${(j.slug || '')}/${(j.chapter ?? '')} — ${j.status} ${j.progress || 0}%`.trim();
-      const resume = j.status === 'paused'
-        ? ` <button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="resumeBatchJob('${escJs(jid)}')">استئناف</button>` : '';
-      const view = j.batch_id
-        ? `<button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="reattachBatch('${escJs(j.batch_id)}')">عرض</button>` : '';
-      rows.push(`<div class="tasks-drawer-row"><span class="t-label" title="${escHtml(label)}">${escHtml(label)}</span>`
-        + `<span style="white-space:nowrap;">${resume}<button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="cancelBatchJob('${escJs(jid)}','${escJs(j.batch_id || '')}')">إلغاء</button>`
-        + `${view}</span></div>`);
+      const title = [j.slug, j.chapter].filter(Boolean).join(' / ') || j.url || jid;
+      const acts = [];
+      if (j.status === 'paused') acts.push(`<button class="action-btn" onclick="resumeBatchJob('${escJs(jid)}')">استئناف</button>`);
+      acts.push(`<button class="action-btn" onclick="cancelBatchJob('${escJs(jid)}','${escJs(j.batch_id || '')}')">إلغاء</button>`);
+      if (j.batch_id) acts.push(`<button class="action-btn" onclick="hideTasksModal();reattachBatch('${escJs(j.batch_id)}')">عرض</button>`);
+      cards.push(taskCard({ chip: TASK_AR[j.status] || j.status, chipCls: j.status === 'paused' ? 'is-paused' : '', title, progress: j.progress || 0, actions: acts.join('') }));
     }
     for (const t of (sres.tasks || [])) {
       if (t.done) continue;
-      const label = `تحميل: ${(t.url || '').slice(0, 60)} — ${t.status}`;
-      rows.push(`<div class="tasks-drawer-row"><span class="t-label" title="${escHtml(t.url || '')}">${escHtml(label)}</span>`
-        + `<span style="white-space:nowrap;"><button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="cancelScrapeTask('${escJs(t.id)}')">إلغاء</button>`
-        + `<button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="pollScrapeTask('${escJs(t.id)}')">عرض</button></span></div>`);
+      const acts = [`<button class="action-btn" onclick="cancelScrapeTask('${escJs(t.id)}')">إلغاء</button>`,
+        `<button class="action-btn" onclick="hideTasksModal();pollScrapeTask('${escJs(t.id)}')">عرض</button>`];
+      cards.push(taskCard({ chip: TASK_AR[t.status] || t.status || 'تحميل', title: t.url || t.id, progress: 0, actions: acts.join('') }));
     }
-  } catch (e) { /* drawer is best-effort; badge keeps last state */ }
-  if (rows.length) {
+  } catch (e) { /* best-effort; badge keeps last state */ }
+  if (cards.length) {
     badge.classList.remove('hidden');
-    count.textContent = rows.length;
-    box.innerHTML = rows.join('');
+    count.textContent = cards.length;
+    box.innerHTML = cards.join('');
   } else {
     badge.classList.add('hidden');
-    box.innerHTML = '<div style="font-size:12px;opacity:.7;">لا مهام جارية — كل شيء هادئ.</div>';
+    box.innerHTML = '<div class="task-empty">لا مهام جارية — كل شيء هادئ.</div>';
   }
 }
+function refreshTasksDrawer() { refreshTasksModal(); }
 setInterval(() => {
   // Lightweight badge upkeep (2 small GETs every 8s); full render when open.
-  const drawer = document.getElementById('tasks-drawer');
-  if (drawer && !drawer.classList.contains('hidden')) refreshTasksDrawer();
+  const modal = document.getElementById('tasks-modal');
+  if (modal && !modal.classList.contains('hidden')) refreshTasksModal();
   else {
     fetch('/api/queue').then(r => r.ok ? r.json() : null).then(q => {
       const n = q ? (q.jobs || []).filter(j => TASK_ACTIVE_Q.has(j.status)).length : 0;
@@ -2165,6 +2192,7 @@ async function cancelBatchJob(jobId, batchId) {
   } catch (e) {
     toast('خطأ في الإلغاء: ' + e.message, 'error');
   }
+  refreshTasksModal();
 }
 async function retryBatchJob(jobId, batchId) {
   try {
