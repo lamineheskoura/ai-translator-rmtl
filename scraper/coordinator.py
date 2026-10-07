@@ -154,11 +154,21 @@ def estimate_vertical_geometry(page_texts: dict, png_dims: list,
         return None, 0.0
     s = 1.0 / a
     res = sorted(t - c / s for c, t in pts)
-    # H0 = median of the smallest residuals: pages whose topmost box
-    # sits (nearly) flush with the page top reveal the header offset.
-    # (Live-browser verified: min residuals cluster at true H0.)
-    k = min(7, len(res))
-    h0 = sorted(res[:max(k, 1)])[max(k, 1) // 2] if res else 0.0
+    # H0 = smallest residual, corroborated: the flushest box top across
+    # all pages sits ~at the ad-header height (in-page offsets are >= 0).
+    # Live-browser verified on 2 chapters (both H0=275.0 exactly).
+    # Guardrails: need a 2nd residual within 25px (rejects single
+    # misassigned-overlay outliers), H0 within [0, 600] (ad headers are
+    # small; larger means no flush box exists), else fall back below.
+    h0 = None
+    if res:
+        lo = res[0]
+        if 0.0 <= lo <= 600.0 and sum(1 for r in res if r <= lo + 25.0) >= 2:
+            h0 = lo
+    if h0 is None:
+        k = min(7, len(res))
+        h0 = sorted(res[:max(k, 1)])[max(k, 1) // 2] if res else 0.0
+        print(f"   [!] H0 fallback (no corroborated flush box).")
     h0 = max(0.0, min(2000.0, h0))
     print(f"   [i] Vertical geometry: s={s:.4f} H0={h0:.1f}css "
           f"({len(pts)} overlays, {len(slopes)} pairs)")
@@ -260,34 +270,23 @@ def assign_texts_to_images(
     else:
         h0, gap = 0.0, 0.0
 
-    # Container-vs-image X offset: overlay boxes sometimes span a WIDER
-    # container than the page image (e.g. ~950css container vs a 700px
-    # image centered inside it). Then css_left lives in container space
-    # and every box shifts left by the side margin. Applied ONLY when
-    # proven (boxes wider than the image); otherwise the legacy path keeps
-    # all existing chapters byte-identical. Y mapping is untouched.
+    # Static layout geometry (live-browser verified on 2 chapters):
+    # the site authors overlays in a ~970px container; page images render
+    # at min(natural, 940) centered inside it. Overlay `left` is the box
+    # CENTER in container space (translateX(-50%)), `top` is exact.
     import statistics as _st
     x_scale, x_offset = scale, 0.0
     try:
-        _rights = []
-        for _v in (page_texts or {}).values():
-            for _o in (_v or []):
-                _w = float(_o.get("css_width", 0) or 0)
-                if _w > 0:
-                    _rights.append(float(_o.get("css_left", 0) or 0) + _w)
         _nat_ws = [w for w, _ in (png_dims or []) if w and w > 0]
-        if _rights and _nat_ws:
-            _rights.sort()
-            _container_w = _rights[min(len(_rights) - 1,
-                                       int(len(_rights) * 0.99))]
+        if _nat_ws:
             _med_nat = _st.median(_nat_ws)
-            if _container_w > _med_nat * 1.02:
-                _displayed = min(_med_nat, _container_w)
-                if _displayed > 0:
-                    x_scale = _med_nat / _displayed
-                    x_offset = max(0.0, (_container_w - _displayed) / 2.0)
-                    print(f"   [i] X-offset: container {_container_w:.0f}css "
-                          f"vs page {_displayed:.0f}css -> "
+            _displayed = min(_med_nat, 940.0)
+            if _displayed > 0:
+                x_scale = _med_nat / _displayed
+                x_offset = max(0.0, (970.0 - _displayed) / 2.0)
+                if x_offset > 0:
+                    print(f"   [i] X-offset: container 970css vs "
+                          f"page {_displayed:.0f}css -> "
                           f"shift {x_offset:.1f}css, s_x={x_scale:.4f}")
     except Exception:
         x_scale, x_offset = scale, 0.0
@@ -329,11 +328,18 @@ def assign_texts_to_images(
             max_rel = max(0.0, page_css_h - ov_css_h)
             rel_css_top = min(max(rel_css_top, 0.0), max_rel)
 
-            x_px = round(max(0.0, ov["css_left"] - x_offset) * x_scale, 2)
+            # Box width = style max-width (canonical block geometry, as the
+            # site authors it; live deviations are prior drag-edits, not
+            # to be cloned). Center/top are exact; Arabic is re-fitted
+            # at render time by the exporter anyway.
+            fit_css_w = float(ov.get("css_width", 0) or 0)
+            css_left_fit = float(ov["css_left_center"]) - fit_css_w / 2.0
+
+            x_px = round(max(0.0, css_left_fit - x_offset) * x_scale, 2)
             y_px = round(rel_css_top * scale, 2)
             x_center_px = round(
                 max(0.0, ov["css_left_center"] - x_offset) * x_scale, 2)
-            width_px = round(ov["css_width"] * x_scale, 2)
+            width_px = round(fit_css_w * x_scale, 2)
             height_px = round(ov["css_height"] * scale, 2)
             font_px = round(ov["css_font_size"] * scale, 2)
 

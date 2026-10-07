@@ -37,3 +37,10 @@
 - `server.py` / `app.js` / `coordinator.py` تُعدَّل بملكية واحدة في المرة.
 - تغيير defaults (دمج/سترُوك) يتم في الطبقات الثلاث معاً أو لا يتم.
 - أي إصلاح: `smoke.bat` أخضر + سطر في رسالة الـcommit يذكر العقد.
+
+## 7) Live-verified geometry model (real browser, 2 chapters, Oct 2026)
+- left = box CENTER exact to 0.03px, 	op exact - use as-is. Site centers via translateX(-50%).
+- H0 = min residual with corroboration (2nd point within 25px), clamped [0,600], else median-of-7 fallback. Verified 275.0/275.0 vs 275.0 live on both chapters.
+- width = max-width (canonical block geometry). Live width deviations are prior drag-edits, NOT cloned.
+- height = style height. Theme constants: container 970, displayed = min(natural,940), offset = (970-displayed)/2, uniform s both axes.
+- Proven accuracy: Y within 2.3px, X centers exact, 7/8 contract boxes at dx=0.0. Never re-scrape ch158 silently - use refetch (preserves translations).
