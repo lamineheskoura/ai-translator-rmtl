@@ -249,20 +249,14 @@ def measure_fitted(draw, text: str, font_path: str, start_size: int,
 def boost_fitted(draw, text: str, font_path: str, fitted: int,
                  max_w: float, max_h: float, line_height_factor: float = 1.2,
                  line_gap: int = 2) -> int:
-    """Enlarge a fitted size by AUTO_FIT_BOOST while it still fits.
-
-    Never goes below `fitted`. Returns the boosted (or original) size.
+    """User rule: fit FIRST (box growth + shrink), then grow the result by
+    AUTO_FIT_BOOST unconditionally. No re-verification against the box —
+    the user explicitly wants the +25% on the fitted number itself.
     """
     try:
-        target = min(120, int(round(fitted * AUTO_FIT_BOOST)))
+        return max(fitted, min(120, int(round(fitted * AUTO_FIT_BOOST))))
     except Exception:
         return fitted
-    if target <= fitted:
-        return fitted
-    bfit, _, _, _, _, _, _ = measure_fitted(
-        draw, text, font_path, target, max_w, max_h,
-        line_height_factor, line_gap, min_size=fitted)
-    return max(fitted, bfit)
 
 
 def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,

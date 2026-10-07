@@ -379,10 +379,6 @@ function estimateSmartSize(text, boxW, boxH, lineHeight) {
   return 8;
 }
 
-// +25% experimental boost (user-tuned): fitted sizes grow a quarter
-// while they still fit. Floor: never below the fitted size itself.
-const AUTO_FIT_BOOST = 1.25;
-
 function computeSmartFontSize(t, allowGrow = false) {
   // Box-aware smart size: start from max(current, area-guess) so short
   // texts in big bubbles grow to fill, long texts shrink to fit.
@@ -416,10 +412,9 @@ function computeSmartFontSize(t, allowGrow = false) {
   }
   while (size > 8 && !fits(size)) size--;
   if (size <= 8 && Math.max(det, area) >= 14) return Math.max(det, area); // DOM suspect — trust math
-  // Boost +25% while it still fits (never below the fitted size).
-  let boosted = Math.min(120, Math.round(size * AUTO_FIT_BOOST));
-  while (boosted > size && !fits(boosted)) boosted--;
-  return Math.max(8, Math.max(size, boosted));
+  // NOTE: no forced boost here. The +25% boost lives ONLY in the server
+  // smart-fit (endpoint/worker), so opening a chapter never compounds sizes.
+  return Math.max(8, size);
 }
 
 // Auto-fit every rendered overlay after load/translation: box-aware fill.
