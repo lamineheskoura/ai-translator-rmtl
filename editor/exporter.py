@@ -426,6 +426,7 @@ def _render_page(background: Image.Image, texts: list[dict],
             _mstroke = 0.0
 
         # Single shared truth with box-autofit: fit via measure_fitted.
+        requested = max(8, int(round(font_size * FONT_SCALE * font_scale)))
         (fitted_font_size, font, wrapped, line_widths,
          line_heights, base_line_h, total_text_h) = measure_fitted(
             draw, arabic, font_path, requested, max_w, max_h,
