@@ -104,12 +104,15 @@ def estimate_vertical_geometry(page_texts: dict, png_dims: list,
     the ad-header offset; live-browser verified).
     geo_tops ({page: [tops]}, incl. empty placeholder boxes) adds extra
     geometry points without creating texts.
-    Returns (None, 0.0) when fewer than 3 points exist.
+    Returns (None, 0.0) when fewer than 3 points exist — including ALL
+    single-page chapters (no cross-page baseline possible by construction);
+    callers then degrade to the width-based horizontal scale.
     """
     cum = [0.0]
     for _, h in (png_dims or []):
         cum.append(cum[-1] + (h or 0))
     pts: list[tuple[float, float]] = []
+    seen: set = set()
     for idx, arr in (page_texts or {}).items():
         try:
             ci = int(idx)
@@ -119,7 +122,9 @@ def estimate_vertical_geometry(page_texts: dict, png_dims: list,
             continue
         for t in arr:
             try:
-                pts.append((cum[ci], float(t.get("css_top", 0) or 0)))
+                f = float(t.get("css_top", 0) or 0)
+                seen.add((cum[ci], round(f, 1)))
+                pts.append((cum[ci], f))
             except Exception:
                 continue
     for idx, tops in (geo_tops or {}).items():
@@ -131,8 +136,13 @@ def estimate_vertical_geometry(page_texts: dict, png_dims: list,
             continue
         for tp in (tops or []):
             try:
-                if float(tp) > 0:
-                    pts.append((cum[ci], float(tp)))
+                f = float(tp)
+                # Dedupe: geo_tops repeats non-empty overlay tops already
+                # added above; without this the minimum self-corroborates
+                # and the outlier guard always passes.
+                if f > 0 and (cum[ci], round(f, 1)) not in seen:
+                    seen.add((cum[ci], round(f, 1)))
+                    pts.append((cum[ci], f))
             except Exception:
                 continue
     if len(pts) < 3:
@@ -169,7 +179,7 @@ def estimate_vertical_geometry(page_texts: dict, png_dims: list,
         k = min(7, len(res))
         h0 = sorted(res[:max(k, 1)])[max(k, 1) // 2] if res else 0.0
         print(f"   [!] H0 fallback (no corroborated flush box).")
-    h0 = max(0.0, min(2000.0, h0))
+    h0 = max(0.0, min(600.0, h0))
     print(f"   [i] Vertical geometry: s={s:.4f} H0={h0:.1f}css "
           f"({len(pts)} overlays, {len(slopes)} pairs)")
     return s, h0
@@ -197,7 +207,7 @@ def estimate_header_and_gaps(page_texts: dict, png_dims: list,
             continue
     if len(per_page_min) < 2:
         h0 = min(per_page_min.values()) if per_page_min else 0.0
-        return max(0.0, min(2000.0, h0)), 0.0
+        return max(0.0, min(600.0, h0)), 0.0
     items = sorted(per_page_min.items())
     slopes = []
     for i in range(len(items)):
@@ -210,7 +220,7 @@ def estimate_header_and_gaps(page_texts: dict, png_dims: list,
     g = max(0.0, min(10.0, g))
     resids = sorted(r - g * p for p, r in items)
     h0 = resids[max(0, int(len(resids) * 0.10))]
-    h0 = max(0.0, min(2000.0, h0))
+    h0 = max(0.0, min(600.0, h0))
     print(f"   [i] Header H0={h0:.1f}css + gap g={g:.2f}css/page "
           f"({len(items)} pages)")
     return h0, g
@@ -237,7 +247,7 @@ def calibrate_scale_from_tops(page_texts: dict, png_dims: list) -> float | None:
         return None
     total_png_h = sum(h for _, h in png_dims)
     s = total_png_h / doc_css_h
-    if s <= 0:
+    if not (0.3 <= s <= 3.0):
         return None
     print(f"   [i] Calibrated scale from overlay tops: {s:.4f}  "
           f"(PNG {total_png_h}px / CSS {doc_css_h:.1f}px)")

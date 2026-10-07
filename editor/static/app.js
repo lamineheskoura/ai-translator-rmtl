@@ -33,6 +33,8 @@ let currentChapter = '';
 let currentPage = 1;
 let totalPages = 1;
 let isDirty = false;
+let dirtyVersion = 0; // bumped on every markDirty — guards in-flight saves
+let lastPanelUndo = 0; // coalesced panel-edit undo (one snapshot per burst)
 let currentTool = 'select';
 let selectedTextEl = null;
 let saveTimeout = null;
@@ -91,6 +93,7 @@ function approveSelected(status) {
   if (isViewOnly()) { toast('وضع المشاهدة: القراءة فقط', 'warning'); return; }
   const ov = getSelectedOverlay();
   if (!ov) { toast('اختر نصاً أولاً', 'warning'); return; }
+  pushUndo();
   ov.data.approved = status;
   if (ov.el) {
     ov.el.classList.toggle('approved', status === 'approved');
@@ -350,7 +353,10 @@ function measureTextFit(text, fontFamily, fontSize, lineHeight, boxWidth, boxHei
   measurer.textContent = text && text.trim() ? text : 'نص';
 
   const h = measurer.scrollHeight;
-  const w = Math.min(measurer.scrollWidth, Math.max(20, boxWidth));
+  let w = Math.min(measurer.scrollWidth, Math.max(20, boxWidth));
+  // Latin parity with the exporter (LATIN_WIDTH_FACTOR=0.8): the render
+  // font measures wider than the site font — scale down identically.
+  if (!hasArabicChars(text || '')) w = w * 0.8;
   const estimatedLineCount = Math.max(1, Math.round(h / Math.max(1, fontSize * lineHeight)));
   return { width: w, height: h, lineCount: estimatedLineCount };
 }
@@ -367,14 +373,19 @@ function areaGuessSize(text, boxW, boxH) {
 
 // Deterministic smart size from box + char count (no DOM needed):
 // largest size whose estimated wrapped lines fit the box height.
+// Budgets mirror the exporter exactly: box minus adaptive padding
+// (NOT a 0.96 fudge — parity with measure_fitted or nothing).
 function estimateSmartSize(text, boxW, boxH, lineHeight) {
   const clean = (text || '').replace(/\s+/g, ' ').trim();
   const n = Math.max(1, clean.length);
   const r = hasArabicChars(clean) ? 0.62 : 0.52; // avg advance / font-size
+  const [padX, padY] = fitPadding(boxW, boxH);
+  const fitW = Math.max(1, boxW - padX * 2);
+  const fitH = Math.max(1, boxH - padY * 2);
   for (let size = 120; size >= 8; size--) {
-    const perLine = Math.max(1, Math.floor((boxW * 0.96) / (size * r)));
+    const perLine = Math.max(1, Math.floor(fitW / (size * r)));
     const lines = Math.ceil(n / perLine);
-    if (lines * size * lineHeight <= boxH * 0.96) return size;
+    if (lines * size * lineHeight <= fitH) return size;
   }
   return 8;
 }
@@ -391,8 +402,10 @@ function computeSmartFontSize(t, allowGrow = false) {
   const lineHeight = parseFloat(t.style?.line_height || t.line_height || 1.1) || 1.1;
   const font = t.style?.font || 'Hayah';
   const fontFamily = displayFontFor(text, font);
-  const fitHeight = boxHeight * 0.96;
-  const fitWidth = boxWidth * 0.96;
+  // Exporter-parity budgets: usable area = box minus adaptive padding.
+  const [padX, padY] = fitPadding(boxWidth, boxHeight);
+  const fitHeight = Math.max(1, boxHeight - padY * 2);
+  const fitWidth = Math.max(1, boxWidth - padX * 2);
   const det = estimateSmartSize(text, boxWidth, boxHeight, lineHeight);
   const area = areaGuessSize(text, boxWidth, boxHeight);
 
@@ -411,7 +424,10 @@ function computeSmartFontSize(t, allowGrow = false) {
     }
   }
   while (size > 8 && !fits(size)) size--;
-  if (size <= 8 && Math.max(det, area) >= 14) return Math.max(det, area); // DOM suspect — trust math
+  // DOM deemed untrustworthy here (everything failed): trust the rigorous
+  // box-derived estimate, NOT the fill guess — a proven-overflow size is
+  // never an acceptable return.
+  if (size <= 8 && Math.max(det, area) >= 14) return Math.max(8, det);
   // NOTE: no forced boost here. The +25% boost lives ONLY in the server
   // smart-fit (endpoint/worker), so opening a chapter never compounds sizes.
   return Math.max(8, size);
@@ -452,12 +468,12 @@ async function rerenderCurrentView() {
 }
 
 async function applyFontSizeToAll() {
-  pushUndo();
   const ov = getSelectedOverlay();
   if (!ov) {
     toast('اختر نصاً أولاً', 'warning');
     return;
   }
+  pushUndo(); // AFTER guards
   const fontSize = parseInt(document.getElementById('prop-size').value, 10) || 45;
   for (const page of chapterData.pages || []) {
     for (const tt of (page.texts || [])) {
@@ -481,10 +497,16 @@ async function smartFitTexts(scope = 'all') {
     const res = await fetch(
       `/api/chapter/${currentSlug}/${currentChapter}/smart-fit`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ grow_boxes: true, unify_stroke: false }) });
+        body: JSON.stringify({ grow_boxes: true, unify_stroke: false,
+                               scope, page: scope === 'page' ? currentPage : null }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    if (data.status !== 'ok') throw new Error(data.detail || 'smart-fit failed');
     const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
-    chapterData = await res2.json();
+    if (!res2.ok) throw new Error('HTTP ' + res2.status);
+    const fresh = await res2.json();
+    if (!fresh || !Array.isArray(fresh.pages)) throw new Error('bad chapter payload');
+    chapterData = fresh;
     await rerenderCurrentView();
     autoFittedKey = `${currentSlug}::${currentChapter}`;
     toast(`ضبط ذكي: صناديق ${data.grown || 0}، خط ${data.shrunk || 0}، تعزيز ${data.boosted || 0} (بقي ${data.kept || 0})`, 'success');
@@ -595,19 +617,21 @@ function renderChapterList(filter) {
   }
   list.innerHTML = items.map(ch => {
     const st = chapterStatusLine(ch);
+    // Escape everything interpolated: titles come from scraped pages.
+    const slug = escJs(ch.slug), chap = escJs(ch.chapter);
     return `
       <div class="chapter-item">
-        <div class="chapter-item-main" onclick="loadChapter('${ch.slug}','${ch.chapter}')">
+        <div class="chapter-item-main" onclick="loadChapter('${slug}','${chap}')">
           <div>
-            <div class="chapter-item-title">${ch.title || ch.slug} — فصل ${ch.chapter}</div>
-            <div class="chapter-item-meta">${st.text}</div>
+            <div class="chapter-item-title">${escHtml(ch.title || ch.slug)} — فصل ${escHtml(ch.chapter)}</div>
+            <div class="chapter-item-meta">${escHtml(st.text)}</div>
             <div class="chapter-progress"><div class="chapter-progress-fill" style="width:${st.pct}%"></div></div>
           </div>
           <div style="color:var(--accent)">← فتح</div>
         </div>
         <div class="chapter-item-actions">
-          <button class="btn-icon" onclick="resetChapter('${ch.slug}','${ch.chapter}',event)" title="مسح الترجمة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-retry"/></svg></button>
-          <button class="btn-icon btn-icon-danger" onclick="deleteChapter('${ch.slug}','${ch.chapter}',event)" title="حذف الفصل"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
+          <button class="btn-icon" onclick="resetChapter('${slug}','${chap}',event)" title="مسح الترجمة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-retry"/></svg></button>
+          <button class="btn-icon btn-icon-danger" onclick="deleteChapter('${slug}','${chap}',event)" title="حذف الفصل"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
         </div>
       </div>
     `;
@@ -664,13 +688,17 @@ async function loadChapter(slug, chapter) {
   const welcome = document.querySelector('.welcome-overlay');
   if (welcome) welcome.remove();
 
-  currentSlug = slug;
-  currentChapter = chapter;
-  currentPage = 1;
-
   try {
     const res = await fetch(`/api/chapter/${slug}/${chapter}`);
-    chapterData = await res.json();
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const fresh = await res.json();
+    if (!fresh || !Array.isArray(fresh.pages)) throw new Error('bad chapter payload');
+    chapterData = fresh;
+    // Commit the new identity ONLY after the payload proved valid —
+    // a failed load must never poison slug/chapter for the next save.
+    currentSlug = slug;
+    currentChapter = chapter;
+    currentPage = 1;
     totalPages = chapterData.total_images || chapterData.pages.length;
 
     document.getElementById('chapter-title-display').textContent =
@@ -915,8 +943,38 @@ function createTextOverlay(t, parentBlock) {
   return el;
 }
 
+let activeDrag = null; // single global drag state (no per-overlay document listeners)
+if (typeof document !== 'undefined' && !document.__mangaDragWired) {
+  document.__mangaDragWired = true;
+  document.addEventListener('mousemove', (e) => {
+    if (!activeDrag) return;
+    const { el, t, startX, startY, initialLeft, initialTop } = activeDrag;
+    if (!document.contains(el)) { activeDrag = null; return; }
+    if (!activeDrag.pushed) {
+      // Snapshot once, on first real movement — plain clicks neither
+      // pollute undo nor wipe the redo stack.
+      pushUndo();
+      activeDrag.pushed = true;
+    }
+    const zoom = currentZoom || 1;
+    const dx = (e.clientX - startX) / zoom;
+    const dy = (e.clientY - startY) / zoom;
+    el.style.left = (initialLeft + dx) + 'px';
+    el.style.top = (initialTop + dy) + 'px';
+    const overlay = textOverlaysById[t.id];
+    if (overlay) overlay.data.x = Math.round(initialLeft + dx);
+    if (overlay) overlay.data.y = Math.round(initialTop + dy);
+  });
+  document.addEventListener('mouseup', () => {
+    if (!activeDrag) return;
+    const { t } = activeDrag;
+    activeDrag = null;
+    syncOverlayToData(t.id);
+    markDirty();
+  });
+}
+
 function makeDraggable(el, t) {
-  let startX, startY, initialLeft, initialTop, isDragging = false;
   el.addEventListener('mousedown', (e) => {
     if (isViewOnly()) return;
     if (e.button !== 0) return;
@@ -925,31 +983,13 @@ function makeDraggable(el, t) {
     if (el.getAttribute('contenteditable') === 'true') return;
     e.preventDefault();
     e.stopPropagation();
-    isDragging = true;
-    startX = e.clientX;
-    startY = e.clientY;
-    initialLeft = parseInt(el.style.left);
-    initialTop = parseInt(el.style.top);
+    activeDrag = {
+      el, t, pushed: false,
+      startX: e.clientX, startY: e.clientY,
+      initialLeft: parseInt(el.style.left) || 0,
+      initialTop: parseInt(el.style.top) || 0,
+    };
     selectText(t.id, el);
-  });
-  document.addEventListener('mousemove', (e) => {
-    if (!isDragging) return;
-    const zoom = currentZoom || 1;
-    const dx = (e.clientX - startX) / zoom;
-    const dy = (e.clientY - startY) / zoom;
-    el.style.left = (initialLeft + dx) + 'px';
-    el.style.top = (initialTop + dy) + 'px';
-    // Live update properties
-    const overlay = textOverlaysById[t.id];
-    if (overlay) overlay.data.x = Math.round(initialLeft + dx);
-    if (overlay) overlay.data.y = Math.round(initialTop + dy);
-  });
-  document.addEventListener('mouseup', () => {
-    if (isDragging) {
-      isDragging = false;
-      syncOverlayToData(t.id);
-      markDirty();
-    }
   });
 }
 
@@ -965,9 +1005,13 @@ function startInlineEdit(el, t) {
     el.removeAttribute('contenteditable');
     el.style.userSelect = currentTool === 'select' ? 'none' : 'text';
     el.style.cursor = 'move';
-    t.arabic_text = el.textContent || '';
-    syncOverlayToData(t.id);
-    markDirty();
+    const nv = el.textContent || '';
+    if (nv !== (t.arabic_text || '')) {
+      pushUndo(); // inline text edits are now undoable
+      t.arabic_text = nv;
+      syncOverlayToData(t.id);
+      markDirty();
+    }
     el.removeEventListener('blur', onBlur);
   };
   el.addEventListener('blur', onBlur);
@@ -1249,13 +1293,19 @@ function onPropChange() {
   const el = ov.el;
   const t = ov.data;
 
+  // Panel edits are undoable, coalesced per burst (not per keystroke).
+  const now = Date.now();
+  if (now - lastPanelUndo > 2000) { pushUndo(); lastPanelUndo = now; }
+
   const text = document.getElementById('prop-content').value;
   el.textContent = text;
   t.arabic_text = text;
 
-  const fontSize = parseInt(document.getElementById('prop-size').value);
+  const rawSize = parseInt(document.getElementById('prop-size').value);
+  const fontSize = isNaN(rawSize) ? (parseInt(t.style?.font_size || t.font_size_px) || 45) : Math.max(6, Math.min(200, rawSize));
   el.style.fontSize = fontSize + 'px';
-  const lineHeight = parseFloat(document.getElementById('prop-line-height').value || '1.1');
+  const rawLh = parseFloat(document.getElementById('prop-line-height').value || '1.1');
+  const lineHeight = isNaN(rawLh) ? (parseFloat(t.style?.line_height || t.line_height) || 1.1) : Math.max(0.7, Math.min(3.0, rawLh));
   el.style.lineHeight = String(lineHeight);
 
   const rawColor = document.getElementById('prop-color').value;
@@ -1271,7 +1321,8 @@ function onPropChange() {
 
   const strokeEnabled = document.getElementById('prop-stroke-enable').checked;
   const strokeColor = document.getElementById('prop-stroke-color').value;
-  const strokeWidth = parseFloat(document.getElementById('prop-stroke-width').value);
+  const rawSw = parseFloat(document.getElementById('prop-stroke-width').value);
+  const strokeWidth = isNaN(rawSw) ? (parseFloat(t.style?.stroke_width) || 0) : Math.max(0, Math.min(20, rawSw));
 
   setOverlayStrokeStyles(el, strokeEnabled, strokeWidth, strokeColor);
 
@@ -1367,6 +1418,7 @@ function setStatusLeft(text) {
 }
 function markDirty() {
   isDirty = true;
+  dirtyVersion++;
   setStatusLeft('غير محفوظ');
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(saveAll, 1500);
@@ -1381,6 +1433,9 @@ async function saveAll() {
   savePromise = (async () => {
     isSaving = true;
     setStatusLeft('جاري الحفظ...');
+    // Snapshot the dirty generation: edits made while this PUT is in
+    // flight bump dirtyVersion, and must NOT be cleared as "saved".
+    const flightVersion = dirtyVersion;
 
     try {
       for (const textId in textOverlaysById) {
@@ -1397,8 +1452,15 @@ async function saveAll() {
         throw new Error(data.detail || data.message || 'فشل الحفظ');
       }
 
-      isDirty = false;
-      setStatusLeft('تم الحفظ');
+      if (dirtyVersion === flightVersion) {
+        isDirty = false;
+        setStatusLeft('تم الحفظ');
+      } else {
+        // New edits landed mid-flight: they are NOT in the payload —
+        // keep dirty and save again immediately.
+        setStatusLeft('غير محفوظ');
+        setTimeout(saveAll, 300);
+      }
       toast('تم حفظ التغييرات', 'success');
       return true;
     } catch (e) {
@@ -1417,16 +1479,16 @@ async function saveAll() {
 
 async function deleteTextObject() {
   if (guardViewOnly()) return;
-  pushUndo();
   const ov = getSelectedOverlay();
   if (!ov) return;
+  pushUndo(); // AFTER guards: no-ops must not wipe the redo stack
   const t = ov.data;
   const id = t.id;
   ov.el.remove();
   delete textOverlaysById[id];
   if (chapterData) {
-    for (const page of chapterData.pages) {
-      page.texts = page.texts.filter(tt => tt.id !== id);
+    for (const page of chapterData.pages || []) {
+      page.texts = (page.texts || []).filter(tt => tt.id !== id);
     }
   }
   selectedTextEl = null;
@@ -1438,12 +1500,12 @@ async function deleteTextObject() {
 // ─── BATCH STYLE ────────────────────────────────────────
 async function applyStyleToAll() {
   if (guardViewOnly()) return;
-  pushUndo();
   const ov = getSelectedOverlay();
   if (!ov) {
     toast('اختر نصاً أولاً', 'warning');
     return;
   }
+  pushUndo(); // AFTER guards
   const t = ov.data;
 
   const style = buildStyleSnapshot(t);
@@ -1457,11 +1519,13 @@ async function applyStyleToAll() {
   }
 
   try {
-    await fetch(`/api/chapter/${currentSlug}/${currentChapter}/batch-style`, {
+    const res = await fetch(`/api/chapter/${currentSlug}/${currentChapter}/batch-style`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ style, scope: 'all' }),
     });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    markDirty(); // local data already matches the server — keep it saveable
     toast('تم تطبيق التنسيق على كل النصوص', 'success');
     if (viewMode === 'single') await renderSinglePage(currentPage);
     else await renderWebtoon();
@@ -1472,24 +1536,27 @@ async function applyStyleToAll() {
 
 async function applyStyleToPage() {
   if (guardViewOnly()) return;
-  pushUndo();
   const ov = getSelectedOverlay();
   if (!ov) {
     toast('اختر نصاً أولاً', 'warning');
     return;
   }
+  pushUndo(); // AFTER guards
   const t = ov.data;
 
   const style = buildStyleSnapshot(t);
 
-    const pageData = chapterData.pages.find(p => p.page === currentPage);
+    const pageData = (chapterData.pages || []).find(p => p.page === currentPage);
   if (pageData) {
-    for (const tt of pageData.texts) {
-      tt.style = { ...tt.style, ...style };
+    for (const tt of (pageData.texts || [])) {
+      tt.style = { ...(tt.style || {}), ...style };
       tt.font_size_px = style.font_size;
       tt.line_height = style.line_height;
     }
     markDirty();
+    // Re-render so the DOM matches the mutated data — otherwise the next
+    // saveAll syncs stale overlay values back over this change.
+    await rerenderCurrentView();
   }
   toast('تم تطبيق التنسيق على الصفحة', 'success');
 }
@@ -1614,9 +1681,9 @@ function addNewText() {
     toast('افتح فصلاً أولاً', 'warning');
     return;
   }
-  pushUndo();
-  const pageData = chapterData.pages.find(p => p.page === currentPage);
+  const pageData = (chapterData.pages || []).find(p => p.page === currentPage);
   if (!pageData) return;
+  pushUndo(); // AFTER guards
 
   // Make sure page is rendered in single mode for adding
   if (viewMode === 'webtoon') {
@@ -1625,7 +1692,8 @@ function addNewText() {
     if (!block) return;
   }
 
-  const newId = `text-new-${Date.now()}`;
+  let newId = `text-new-${Date.now()}`;
+  while (textOverlaysById[newId]) newId += '-x'; // never orphan an overlay on id collision
   const newText = {
     id: newId,
     page: currentPage,
@@ -1651,6 +1719,7 @@ function addNewText() {
     },
   };
 
+  pageData.texts = pageData.texts || [];
   pageData.texts.push(newText);
   let block;
   if (viewMode === 'single') {
@@ -1989,12 +2058,15 @@ function escHtml(s) {
 function escJs(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
+let batchPollGen = 0; // a newer batch supersedes older poll loops
 async function pollBatchStatus(batchId) {
+  const myGen = ++batchPollGen;
   const status = document.getElementById('batch-status');
   const TERMINAL = new Set(['review', 'exported', 'failed', 'cancelled']);
   const SUCCESS = new Set(['review', 'exported']);
   const deadline = Date.now() + 30 * 60 * 1000; // 30 دقيقة حد أقصى
   while (true) {
+    if (myGen !== batchPollGen) break; // superseded by a newer batch
     if (Date.now() > deadline) {
       status.innerHTML += '\n⏱ انتهت مهلة التتبع (30 دقيقة) — توقف الاستطلاع. حدّث يدوياً.';
       toast('انتهت مهلة تتبع الدفعة (30 دقيقة)', 'warning');
@@ -2072,8 +2144,10 @@ async function startScrape() {
 
     // Poll for status
     let lastLogSize = 0;
+    const myGen = ++batchPollGen; // shares the generation: a new scrape/batch supersedes
     while (true) {
       await new Promise(r => setTimeout(r, 1500));
+      if (myGen !== batchPollGen) break; // superseded
       let task;
       try {
         const tres = await fetch(`/api/scrape/task/${taskId}`);
@@ -2181,12 +2255,10 @@ async function translateMissingOnce() {
   );
   const data = await res.json();
   if (data.status === 'ok') {
-    const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
-    chapterData = await res2.json();
-    if (viewMode === 'single') await renderSinglePage(currentPage);
-    else await renderWebtoon();
-    autoFittedKey = '';
-    autoFitOnceForChapter();
+    // Server-side fit (grow + boost) — the SAME result the batch worker
+    // produces. Local shrink-only autoFit would leave single-translated
+    // chapters tiny and inconsistent with batch output.
+    await smartFitTexts();
   }
   return data;
 }
@@ -2196,6 +2268,7 @@ async function refetchTexts() {
   // Images come from local cache; translations/styles are restored by id.
   if (!chapterData) { toast('افتح فصلاً أولاً', 'warning'); return; }
   if (!confirm('إعادة جلب النصوص من الموقع؟ (الترجمة الحالية محفوظة، الصور لن تُحمّل مجدداً)')) return;
+  pushUndo(); // geometry replacement is undoable
   toast('جاري جلب النصوص... (قد يأخذ دقيقة)', 'info', 90000);
   try {
     const res = await fetch(
@@ -2205,12 +2278,7 @@ async function refetchTexts() {
     const data = await res.json();
     if (data.status === 'ok') {
       toast(`تم: ${data.found} نصاً، استُعيدت ترجمة ${data.restored}`, 'success');
-      const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
-      chapterData = await res2.json();
-      autoFittedKey = '';
-      if (viewMode === 'single') await renderSinglePage(currentPage);
-      else await renderWebtoon();
-      autoFitOnceForChapter();
+      await smartFitTexts(); // server grow+boost on the fresh geometry
     } else {
       toast('فشل الجلب: ' + (data.detail || JSON.stringify(data)), 'error');
     }
@@ -2270,12 +2338,7 @@ async function autoTranslate() {
       const data = await res.json();
       if (data.status === 'ok') {
         toast(`تمت ترجمة ${data.translated} نص عبر ${data.provider || selectedProvider}`, 'success');
-        const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
-        chapterData = await res2.json();
-        if (viewMode === 'single') await renderSinglePage(currentPage);
-        else await renderWebtoon();
-        autoFittedKey = '';
-        autoFitOnceForChapter();
+        await smartFitTexts(); // server grow+boost — same as batch output
       } else {
         toast('فشلت الترجمة: ' + (data.message || data.detail || JSON.stringify(data)), 'error');
       }
@@ -2387,8 +2450,12 @@ async function startExport() {
   let pages = [];
   if (rangeVal === 'current') pages = [currentPage];
   else if (rangeVal === 'range') {
-    const from = parseInt(document.getElementById('export-range-from').value);
-    const to = parseInt(document.getElementById('export-range-to').value);
+    const total = (chapterData.pages || []).length || 1;
+    let from = parseInt(document.getElementById('export-range-from').value);
+    let to = parseInt(document.getElementById('export-range-to').value);
+    if (isNaN(from) || isNaN(to)) { toast('أدخل رقمي البداية والنهاية', 'warning'); return; }
+    if (from > to) [from, to] = [to, from];
+    from = Math.max(1, from); to = Math.min(total, to);
     for (let i = from; i <= to; i++) pages.push(i);
   }
 
@@ -2436,8 +2503,10 @@ async function startExport() {
             const a = document.createElement('a');
             a.href = url;
             a.download = `${currentSlug}_chapter_${currentChapter}.zip`;
+            // Attached node + deferred revoke: Firefox-safe download.
+            document.body.appendChild(a);
             a.click();
-            URL.revokeObjectURL(url);
+            setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 5000);
             progress.textContent += ' ✓ تم تحميل ZIP';
           }
         }
@@ -2735,8 +2804,9 @@ function downloadExportedText() {
   const a = document.createElement('a');
   a.href = url;
   a.download = lastExportedFilename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 5000);
 }
 function showTextImportModal() {
   if (!chapterData) { toast('افتح فصلاً أولاً', 'warning'); return; }
@@ -2757,6 +2827,7 @@ async function submitTextImport() {
   const report = document.getElementById('text-import-report');
   report.classList.remove('hidden');
   report.textContent = 'جاري الاستيراد...';
+  pushUndo(); // bulk text import is undoable
   try {
     const res = await fetch(`/api/chapter/${currentSlug}/${currentChapter}/text-import`, {
       method: 'POST',
@@ -2771,7 +2842,10 @@ async function submitTextImport() {
     report.textContent = `تقرير الاستيراد:\nمستورد: ${imported}\nمتخطى: ${skipped}\nغير معروف: ${unknown}`;
     toast(`تم الاستيراد: ${imported} / متخطى ${skipped} / غير معروف ${unknown}`, 'success');
     const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
-    chapterData = await res2.json();
+    if (!res2.ok) throw new Error('HTTP ' + res2.status);
+    const fresh = await res2.json();
+    if (!fresh || !Array.isArray(fresh.pages)) throw new Error('bad chapter payload');
+    chapterData = fresh;
     if (viewMode === 'single') await renderSinglePage(currentPage);
     else await renderWebtoon();
   } catch (e) {

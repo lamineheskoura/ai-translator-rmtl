@@ -89,6 +89,26 @@ def find_font_path(font_name: str) -> Optional[str]:
     return None
 
 
+# Font cache: TTF parsing per (path, size) happens ONCE. measure_fitted
+# used to re-parse the font on every shrink step (thousands of redundant
+# loads per chapter). Fonts are immutable per size — cache forever.
+_FONT_CACHE: dict = {}
+
+
+def _load_font(font_path: str, size: int):
+    key = (font_path, int(size))
+    font = _FONT_CACHE.get(key)
+    if font is None:
+        try:
+            font = ImageFont.truetype(font_path, int(size))
+        except Exception:
+            return None
+        # Bound growth: sizes 8..120 x a handful of fonts — tiny.
+        if len(_FONT_CACHE) < 4096:
+            _FONT_CACHE[key] = font
+    return font
+
+
 def _parse_color(val) -> tuple:
     if not val:
         return (0, 0, 0)
@@ -229,10 +249,8 @@ def measure_fitted(draw, text: str, font_path: str, start_size: int,
     font = None
     wrapped, line_widths, line_heights, base_lh, total_h = [""], [0], [0], 0, 0
     while True:
-        try:
-            font = ImageFont.truetype(font_path, fitted)
-        except Exception:
-            font = None
+        font = _load_font(font_path, fitted)
+        if font is None:
             break
         wrapped = _wrap_lines(draw, text, font, max_w)
         line_widths, line_heights, base_lh, total_h = _measure_block(
@@ -259,8 +277,73 @@ def boost_fitted(draw, text: str, font_path: str, fitted: int,
         return fitted
 
 
+def _effective_stroke(style: dict, force_stroke: bool = True,
+                      export_stroke_width: float = 1.5) -> float:
+    """Stroke pixels the truth (render) reserves — autofit must too."""
+    try:
+        sw = float((style or {}).get("stroke_width", 1))
+        enabled = (style or {}).get("stroke_enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.lower() not in ("false", "0", "")
+        elif isinstance(enabled, (int, float)):
+            enabled = bool(enabled)
+        if force_stroke and not enabled:
+            return float(export_stroke_width or 0)
+        if enabled:
+            return max(1.0, sw) if sw < 1 else float(sw)
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def _fit_or_grow(draw, text: str, font_path: str, size: int, floor: int,
+                 max_w: float, max_h: float, lh: float, line_gap: int,
+                 y: float, h: float, h_orig: float, page_h: float,
+                 next_top: float, margin: float, max_grow: float,
+                 pad_y: float, mstroke: float = 0.0):
+    """Grow-first guard: measure the boosted size PINNED (no shrink-back),
+    grow the box to hold it (same downward rules, capped at h_orig*max_grow
+    total), then fit inside the grown box — shrink only as last resort,
+    never below `floor`. Returns (size, h, grew_bool).
+    """
+    try:
+        _, _, _, _, _, _, th = measure_fitted(
+            draw, text, font_path, size, max_w, max_h, lh, line_gap,
+            mstroke, size)
+    except Exception:
+        return size, h, False
+    if th <= max_h:
+        return size, h, False
+    need_h = th + pad_y * 2 + 4
+    if need_h <= h:
+        return size, h, False
+    cap_h = min(page_h - y - 4, next_top - y - margin, h_orig * max_grow)
+    if cap_h <= h:
+        # Box cannot grow: shrink the font to fit, floor = pre-boost size.
+        try:
+            s, _, _, _, _, _, _ = measure_fitted(
+                draw, text, font_path, size, max_w, max_h, lh, line_gap,
+                mstroke, floor)
+        except Exception:
+            return size, h, False
+        return max(floor, s), h, False
+    h2 = min(need_h, cap_h)
+    pad_y2 = min(6.0, max(2.0, h2 * 0.10))
+    max_h2 = max(1, h2 - pad_y2 * 2)
+    try:
+        s2, _, _, _, _, _, _ = measure_fitted(
+            draw, text, font_path, size, max_w, max_h2, lh, line_gap,
+            mstroke, floor)
+    except Exception:
+        return size, h, False
+    return max(floor, s2), h2, True
+
+
 def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
-                          margin: float = 6.0, line_gap: int = 2) -> dict:
+                          margin: float = 6.0, line_gap: int = 2,
+                          force_stroke: bool = True,
+                          export_stroke_width: float = 1.5,
+                          only_pages: Optional[set] = None) -> dict:
     """Grow boxes (down only) so translated text fits at site size.
 
     For each text with arabic_text: if it overflows at site size, extend
@@ -272,6 +355,8 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
     work = Image.new("RGB", (8, 8), (255, 255, 255))
     draw = ImageDraw.Draw(work)
     for page in chapter_data.get("pages", []):
+        if only_pages is not None and page.get("page") not in only_pages:
+            continue
         try:
             page_w = float(page.get("width", 0) or 0)
             page_h = float(page.get("height", 0) or 0)
@@ -292,11 +377,14 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 style = t.get("style", {}) or {}
                 site_size = max(8, int(round(float(
                     style.get("font_size", t.get("font_size_px", 45))))))
-                lh = float(style.get("line_height", t.get("line_height", 1.2)) or 1.2)
+                lh = float(style.get("line_height", t.get("line_height", 1.1)) or 1.1)
                 font_name = style.get("font", "Hayah")
             except Exception:
                 skipped += 1
                 continue
+            mstroke = _effective_stroke(style, force_stroke, export_stroke_width)
+            h_orig = h
+            text_grew = False
             font_path = _pick_font_path(font_name, arabic)
             if not font_path:
                 skipped += 1
@@ -311,20 +399,9 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 0.6 * ((max(w * h, 400.0) / nch) ** 0.5))))
             start_size = min(120, max(site_size, area_start))
             fitted, _, _, _, _, _, _ = measure_fitted(
-                draw, arabic, font_path, start_size, max_w, max_h, lh, line_gap)
-            if fitted >= start_size:
-                # Fits (at site size or area size) -> apply the forced +25%
-                # on the fitted number itself, ALWAYS (even at site size).
-                final = boost_fitted(draw, arabic, font_path, start_size,
-                                     max_w, max_h, lh, line_gap)
-                if final > start_size:
-                    boosted += 1
-                style["font_size"] = int(final)
-                t["font_size_px"] = float(final)
-                t["style"] = style
-                kept += 1
-                continue
-            # Grow the box downward before touching the font size.
+                draw, arabic, font_path, start_size, max_w, max_h, lh,
+                line_gap, mstroke)
+            # Next box top (shared by the pre-grow and the overflow guard).
             next_top = page_h
             for other in texts[idx + 1:]:
                 try:
@@ -336,15 +413,39 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 if oy > y and ox < x + w and x < ox + ow:
                     next_top = min(next_top, oy)
                     break
-            cap_h = min(page_h - y - 4, next_top - y - margin, h * max_grow)
+            if fitted >= start_size:
+                # Fits (at site size or area size) -> apply the forced +25%
+                # on the fitted number itself, ALWAYS (even at site size).
+                # Then grow the box if the boost overflows (never clip).
+                final = boost_fitted(draw, arabic, font_path, start_size,
+                                     max_w, max_h, lh, line_gap)
+                if final > start_size:
+                    boosted += 1
+                final, h, grew = _fit_or_grow(
+                    draw, arabic, font_path, final, start_size,
+                    max_w, max_h, lh, line_gap, y, h, h_orig, page_h,
+                    next_top, margin, max_grow, pad_y, mstroke)
+                if grew and not text_grew:
+                    grown += 1
+                    text_grew = True
+                    t["height"] = round(h, 2)
+                style["font_size"] = int(final)
+                t["font_size_px"] = float(final)
+                t["style"] = style
+                kept += 1
+                continue
+            # Grow the box downward before touching the font size.
+            cap_h = min(page_h - y - 4, next_top - y - margin, h_orig * max_grow)
             if cap_h > h:
                 h = cap_h
                 t["height"] = round(h, 2)
                 pad_y = min(6.0, max(2.0, h * 0.10))
                 max_h = max(1, h - pad_y * 2)
                 grown += 1
+                text_grew = True
                 fitted, _, _, _, _, _, _ = measure_fitted(
-                    draw, arabic, font_path, start_size, max_w, max_h, lh, line_gap)
+                    draw, arabic, font_path, start_size, max_w, max_h, lh,
+                    line_gap, mstroke)
             if fitted < start_size:
                 shrunk += 1
             else:
@@ -354,6 +455,14 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                                  max_w, max_h, lh, line_gap)
             if final > pre:
                 boosted += 1
+            final, h, grew = _fit_or_grow(
+                draw, arabic, font_path, final, pre,
+                max_w, max_h, lh, line_gap, y, h, h_orig, page_h,
+                next_top, margin, max_grow, pad_y, mstroke)
+            if grew and not text_grew:
+                grown += 1
+                text_grew = True
+                t["height"] = round(h, 2)
             style["font_size"] = int(final)
             t["font_size_px"] = float(final)
             t["style"] = style

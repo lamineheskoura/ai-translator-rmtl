@@ -169,7 +169,7 @@ def extract_overlays(page, num_images: int = 0,
     try:
         overlay_els = page.css("div.manga-ocr-button-overlay")
     except Exception:
-        return {}
+        return {}, {}
 
     # ---- pass 1: collect raw geometry for non-empty overlays ----
     raw_items: list = []

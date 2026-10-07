@@ -1,3 +1,4 @@
+import copy
 import json
 import zipfile
 import io
@@ -149,12 +150,12 @@ def set_output_dir(payload: OutputDirPayload):
         raise HTTPException(400, f"Folder not writable: {e}")
     OUTPUT_DIR = p.resolve()
     try:
-        cfg = {}
-        if APP_CONFIG_FILE.exists():
-            cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8"))
-        cfg["output_dir"] = str(OUTPUT_DIR)
-        APP_CONFIG_FILE.write_text(
-            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        with _get_file_lock(APP_CONFIG_FILE):
+            cfg = {}
+            if APP_CONFIG_FILE.exists():
+                cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8"))
+            cfg["output_dir"] = str(OUTPUT_DIR)
+            _atomic_json_dump(APP_CONFIG_FILE, cfg)
     except Exception:
         pass
     return {"status": "ok", "output_dir": str(OUTPUT_DIR)}
@@ -196,12 +197,12 @@ def _save_export_settings(patch: dict) -> dict:
         if k in patch and patch[k] is not None:
             current[k] = patch[k]
     try:
-        cfg = {}
-        if APP_CONFIG_FILE.exists():
-            cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8")) or {}
-        cfg["export"] = current
-        APP_CONFIG_FILE.write_text(
-            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        with _get_file_lock(APP_CONFIG_FILE):
+            cfg = {}
+            if APP_CONFIG_FILE.exists():
+                cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8")) or {}
+            cfg["export"] = current
+            _atomic_json_dump(APP_CONFIG_FILE, cfg)
     except Exception:
         pass
     return current
@@ -500,6 +501,7 @@ def save_chapter(slug: str, chapter: str, payload: ChapterSavePayload):
     if not json_path.exists():
         raise HTTPException(404, f"Chapter not found: {ch_dir}")
 
+    _backup_json(json_path)
     with _file_transaction(json_path) as data:
         old_pages = data.get("pages", [])
         old_pages_by_num = {p.get("page"): p for p in old_pages}
@@ -558,6 +560,7 @@ def batch_update_style(slug: str, chapter: str, update: BatchStyleUpdate,
     ch_dir = _chapter_dir(slug, chapter)
     json_path = ch_dir / "chapter_data.json"
 
+    _backup_json(json_path)
     with _file_transaction(json_path) as data:
         modified = 0
         pages_to_update = data.get("pages", [])
@@ -608,7 +611,7 @@ def export_chapter_endpoint(
             if parts:
                 page_range = parts
         except ValueError:
-            pass
+            raise HTTPException(400, "Invalid pages list (example: 1,2,3)")
     bg_rgb = _parse_color(bg_color)
     stroke_rgb = _parse_color(export_stroke_color)
     files = export_chapter(
@@ -760,40 +763,45 @@ def scrape_new(url: str = Query(..., description="Chapter URL"),
             "done": False,
             "started_at": time.time(),
         }
-        # keep only the last 50 tasks (drop oldest by started_at)
+        # keep only the last 50 tasks (drop oldest FINISHED first —
+        # evicting a running task orphans its worker with a KeyError).
         if len(scrape_tasks) > 50:
             oldest = sorted(scrape_tasks.items(), key=lambda kv: kv[1].get("started_at", 0))
-            for tid, _ in oldest[:len(scrape_tasks) - 50]:
-                scrape_tasks.pop(tid, None)
+            for tid, tinfo in oldest[:len(scrape_tasks) - 50]:
+                if tinfo.get("done"):
+                    scrape_tasks.pop(tid, None)
 
     def _run_scrape():
         try:
             from scraper.coordinator import scrape_chapter
             print(f"[i] Scrape task {task_id[:8]} starting for {url} (browser={browser}, headless={headless})", flush=True)
             ch_dir = scrape_chapter(url, headless=headless, browser=browser)
-            if ch_dir:
-                with scrape_tasks_lock:
-                    t = scrape_tasks[task_id]
+            with scrape_tasks_lock:
+                t = scrape_tasks.get(task_id)
+                if t is None:
+                    return
+                if ch_dir:
                     t["status"] = "ok"
                     t["slug"] = ch_dir.parent.name
                     t["chapter"] = ch_dir.name.replace("chapter_", "")
                     t["log"] += "\n✓ تم التحميل بنجاح\n"
-            else:
-                with scrape_tasks_lock:
-                    t = scrape_tasks[task_id]
+                else:
                     t["status"] = "error"
                     t["error"] = "فشل التحميل - لم يتم العثور على صور"
                     t["log"] += "\n✗ لم يتم العثور على صور\n"
         except Exception as e:
             print(f"[!] Scrape task {task_id[:8]} error: {e}", flush=True)
             with scrape_tasks_lock:
-                t = scrape_tasks[task_id]
+                t = scrape_tasks.get(task_id)
+                if t is None:
+                    return
                 t["status"] = "error"
                 t["error"] = f"خطأ: {str(e)}"
                 t["log"] += f"\n✗ خطأ: {str(e)}\n"
         finally:
             with scrape_tasks_lock:
-                scrape_tasks[task_id]["done"] = True
+                if task_id in scrape_tasks:
+                    scrape_tasks[task_id]["done"] = True
 
     t = threading.Thread(target=_run_scrape, daemon=True)
     t.start()
@@ -876,8 +884,10 @@ def translate_with_provider(
     if not json_path.exists():
         raise HTTPException(404, f"Chapter not found")
 
-    # Phase 1: quick transaction — clear translations only
+    # Phase 1: quick transaction — clear translations only (with .bak first,
+    # so a later translation failure can restore what was wiped).
     if clear:
+        _backup_json(json_path)
         with _file_transaction(json_path) as data:
             print("[i] Clearing existing translations...")
             for page in data.get("pages", []):
@@ -904,6 +914,25 @@ def translate_with_provider(
     result = translate_texts(all_texts, provider_id, model)
 
     if result is None:
+        if clear:
+            # Restore what Phase 1 wiped — never leave the chapter emptier
+            # than we found it.
+            try:
+                bak = json_path.with_suffix(".json.bak")
+                if bak.exists():
+                    with open(bak, "r", encoding="utf-8") as f:
+                        bak_data = json.load(f)
+                    bak_map = {t.get("id", ""): t.get("arabic_text", "")
+                               for p in bak_data.get("pages", [])
+                               for t in p.get("texts", [])}
+                    with _file_transaction(json_path) as data:
+                        for page in data.get("pages", []):
+                            for t in page.get("texts", []):
+                                old_ar = bak_map.get(t.get("id", ""), "")
+                                if old_ar and not t.get("arabic_text"):
+                                    t["arabic_text"] = old_ar
+            except Exception:
+                pass
         raise HTTPException(500, f"فشلت الترجمة عبر {provider_id}. تحقق من API key والموديل.")
 
     # Build id -> arabic_text map from results
@@ -926,15 +955,31 @@ def translate_with_provider(
     return {"status": "ok", "translated": total_ok, "provider": provider_id, "model": model}
 
 
+def _backup_json(json_path: Path):
+    """Best-effort .bak snapshot before any destructive chapter write."""
+    try:
+        if json_path.exists():
+            shutil.copy2(str(json_path), str(json_path) + ".bak")
+    except Exception:
+        pass
+
+
 @app.delete("/api/chapter/{slug}/{chapter}")
 def delete_chapter(slug: str, chapter: str):
-    """Delete an entire chapter directory (images + data)."""
+    """Move a chapter to output/.trash (recoverable) instead of deleting."""
     ch_dir = _chapter_dir(slug, chapter)
     if not ch_dir.exists():
         raise HTTPException(404, f"Chapter not found: {ch_dir}")
-    import shutil
-    shutil.rmtree(str(ch_dir), ignore_errors=True)
-    return {"status": "deleted", "slug": slug, "chapter": chapter}
+    import time as _time
+    try:
+        trash = OUTPUT_DIR / ".trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        dest = trash / f"{slug}__{chapter}__{int(_time.time())}"
+        shutil.move(str(ch_dir), str(dest))
+        return {"status": "deleted", "slug": slug, "chapter": chapter,
+                "trash": dest.name}
+    except Exception as e:
+        raise HTTPException(500, f"Delete failed: {e}")
 
 
 @app.post("/api/chapter/{slug}/{chapter}/refetch-texts")
@@ -954,6 +999,9 @@ def refetch_texts(slug: str, chapter: str):
     url = (old.get("url") or "").strip()
     if not url:
         raise HTTPException(400, "No source URL stored for this chapter")
+    # Snapshot BEFORE the minutes-long rescrape wipes the file; a .bak is
+    # kept too (edits made mid-scrape are recoverable, never silently lost).
+    _backup_json(json_path)
     saved: dict = {}
     for page in old.get("pages", []):
         for t in page.get("texts", []) or []:
@@ -994,6 +1042,7 @@ def reset_chapter(slug: str, chapter: str):
     json_path = ch_dir / "chapter_data.json"
     if not json_path.exists():
         raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    _backup_json(json_path)
     with _file_transaction(json_path) as data:
         count = 0
         for page in data.get("pages", []):
@@ -1009,6 +1058,8 @@ class SmartFitPayload(BaseModel):
     unify_stroke: bool = False
     stroke_width: float = 1.5
     stroke_color: str = "#ffffff"
+    scope: str = "all"
+    page: Optional[int] = None
 
 
 @app.post("/api/chapter/{slug}/{chapter}/smart-fit")
@@ -1022,6 +1073,7 @@ def smart_fit_chapter(slug: str, chapter: str, payload: SmartFitPayload):
     json_path = ch_dir / "chapter_data.json"
     if not json_path.exists():
         raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    _backup_json(json_path)
     with _file_transaction(json_path) as data:
         if payload.unify_stroke:
             for page in data.get("pages", []):
@@ -1033,7 +1085,8 @@ def smart_fit_chapter(slug: str, chapter: str, payload: SmartFitPayload):
                         st["stroke_color"] = payload.stroke_color
                     t["style"] = st
         stats = autofit_chapter_boxes(
-            data, max_grow=2.0 if payload.grow_boxes else 1.0)
+            data, max_grow=2.0 if payload.grow_boxes else 1.0,
+            only_pages={payload.page} if payload.scope == "page" and payload.page is not None else None)
     return {"status": "ok", "slug": slug, "chapter": chapter, **stats}
 
 
@@ -1201,7 +1254,20 @@ def _save_queue():
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         with batch_lock:
-            payload = {"batches": batches, "jobs": batch_jobs}
+            # Bound growth: drop oldest TERMINAL jobs beyond 300 (active
+            # jobs are never touched; get_batch already tolerates missing).
+            if len(batch_jobs) > 400:
+                terminal = ("review", "exported", "failed", "cancelled")
+                old = sorted(
+                    (jid for jid, j in batch_jobs.items()
+                     if j.get("status") in terminal),
+                    key=lambda jid: batch_jobs[jid].get("created_at", 0))
+                for jid in old[:len(batch_jobs) - 300]:
+                    batch_jobs.pop(jid, None)
+            # Deep-copy INSIDE the lock: the worker mutates job dicts, and
+            # dumping a live reference outside the lock tears the snapshot.
+            payload = {"batches": copy.deepcopy(batches),
+                       "jobs": copy.deepcopy(batch_jobs)}
         _atomic_json_dump(_queue_file(), payload)
     except Exception:
         pass
@@ -1220,6 +1286,10 @@ def _load_queue():
                         j["status"] = "failed"
                         j["error"] = "interrupted by restart"
                     batch_jobs[jid] = j
+                    if j.get("status") == "queued":
+                        # Re-arm jobs that never started: else the worker
+                        # blocks on an empty queue forever after restart.
+                        _batch_queue.put(jid)
     except Exception:
         pass
 
@@ -1367,7 +1437,16 @@ def _batch_worker():
                                 need.append(t)
                                 ids.append(t.get("id", ""))
                     if need:
-                        res = translate_texts(need, provider_id, model)
+                        def _job_cancelled(jid=job_id):
+                            with batch_lock:
+                                return bool(batch_jobs.get(jid, {}).get("cancel_requested"))
+                        res = translate_texts(need, provider_id, model,
+                                              should_cancel=_job_cancelled)
+                        with batch_lock:
+                            if batch_jobs.get(job_id, {}).get("cancel_requested"):
+                                batch_jobs[job_id]["status"] = "cancelled"
+                                _save_queue()
+                                continue
                         if res is None:
                             raise RuntimeError(f"translate via {provider_id} failed")
                         tmap = {}
@@ -1468,9 +1547,20 @@ def _batch_worker():
                     batch_jobs[job_id]["progress"] = 100
                     batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "بانتظار المراجعة\n"
                 _save_queue()
-            delay = float(job.get("delay_sec") or 0)
+            delay = max(0.0, float(job.get("delay_sec") or 0))
             if delay > 0:
                 time.sleep(delay)
+        except Exception as e:
+            # Last-resort guard: ONE bad job must never kill the worker
+            # thread (else the whole queue starves silently forever).
+            try:
+                with batch_lock:
+                    if job_id in batch_jobs:
+                        batch_jobs[job_id]["status"] = "failed"
+                        batch_jobs[job_id]["error"] = f"worker error: {e}"
+                _save_queue()
+            except Exception:
+                pass
         finally:
             try:
                 _batch_queue.task_done()
@@ -1516,7 +1606,10 @@ def get_batch(batch_id: str):
         b = batches.get(batch_id)
         if not b:
             raise HTTPException(404, "Batch not found")
-        jobs = [batch_jobs[jid] for jid in b.get("job_ids", []) if jid in batch_jobs]
+        # Snapshot copies inside the lock: the worker mutates live dicts.
+        jobs = [copy.deepcopy(batch_jobs[jid]) for jid in b.get("job_ids", []) if jid in batch_jobs]
+        job_ids_snap = list(b.get("job_ids", []))
+        total = b.get("total", len(jobs))
         counts: dict[str, int] = {}
         for j in jobs:
             counts[j.get("status", "queued")] = counts.get(j.get("status", "queued"), 0) + 1
@@ -1529,7 +1622,7 @@ def get_batch(batch_id: str):
         results = [{"job_id": j.get("job_id", j.get("id")), "slug": j.get("slug"),
                     "chapter": j.get("chapter"), "status": j.get("status")} for j in jobs]
         return {"batch_id": batch_id, "total": total,
-                "job_ids": b.get("job_ids", []), "status_counts": counts, "jobs": jobs,
+                "job_ids": job_ids_snap, "status_counts": counts, "jobs": jobs,
                 "done": done, "completed": completed, "finished": done,
                 "status": "completed" if done else "running",
                 "progress": progress, "results": results}
@@ -1538,12 +1631,13 @@ def get_batch(batch_id: str):
 @app.get("/api/queue")
 def get_queue():
     with batch_lock:
-        jobs = list(batch_jobs.values())
+        jobs = [copy.deepcopy(j) for j in batch_jobs.values()]
+        batches_snap = [copy.deepcopy(b) for b in batches.values()]
         counts: dict[str, int] = {}
         for j in jobs:
             counts[j.get("status", "queued")] = counts.get(j.get("status", "queued"), 0) + 1
         return {"total": len(jobs), "status_counts": counts,
-                "jobs": jobs, "batches": list(batches.values())}
+                "jobs": jobs, "batches": batches_snap}
 
 
 @app.post("/api/queue/cancel/{job_id}")
@@ -1552,6 +1646,9 @@ def cancel_queue_job(job_id: str):
         job = batch_jobs.get(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
+        if job.get("status") in ("review", "exported", "failed", "cancelled"):
+            return {"status": job.get("status"), "job_id": job_id,
+                    "note": "already terminal — nothing to cancel"}
         job["cancel_requested"] = True
         if job.get("status") == "queued":
             job["status"] = "cancelled"
@@ -1573,6 +1670,10 @@ def retry_failed(batch_id: str):
                 j["error"] = None
                 j["progress"] = 0
                 j.pop("cancel_requested", None)
+                # Trim the log: retry loops otherwise grow it (and the
+                # persisted .queue.json) without bound.
+                old_log = j.get("log") or ""
+                j["log"] = (old_log[-2000:] + "\n↻ retry...\n") if old_log else "↻ retry...\n"
                 retried.append(jid)
     for jid in retried:
         _batch_queue.put(jid)

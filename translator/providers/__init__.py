@@ -1,6 +1,7 @@
 import json
 import base64
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -142,6 +143,9 @@ def _load_config() -> dict:
     return _apply_env({k: dict(v) for k, v in DEFAULT_CONFIG.items()})
 
 
+_config_lock = threading.Lock()
+
+
 def _save_config(cfg: dict):
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     # Never persist env-sourced secrets to disk (env stays the source).
@@ -152,7 +156,7 @@ def _save_config(cfg: dict):
             scrubbed[pid]["api_key"] = ""
     tmp = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        json.dump(scrubbed, f, ensure_ascii=False, indent=2)
         f.flush()
         try:
             os.fsync(f.fileno())
@@ -177,22 +181,24 @@ def get_provider(provider_id: str) -> Optional[dict]:
 
 
 def save_provider_config(provider_id: str, updates: dict):
-    cfg = _load_config()
-    if provider_id not in cfg:
-        cfg[provider_id] = dict(DEFAULT_CONFIG.get(provider_id, {}))
-    for k, v in updates.items():
-        cfg[provider_id][k] = v
-    if provider_id in ("custom",) and updates.get("base_url"):
-        cfg[provider_id]["name"] = f"API مخصص — {updates['base_url']}"
-    _save_config(cfg)
+    with _config_lock:
+        cfg = _load_config()
+        if provider_id not in cfg:
+            cfg[provider_id] = dict(DEFAULT_CONFIG.get(provider_id, {}))
+        for k, v in updates.items():
+            cfg[provider_id][k] = v
+        if provider_id in ("custom",) and updates.get("base_url"):
+            cfg[provider_id]["name"] = f"API مخصص — {updates['base_url']}"
+        _save_config(cfg)
 
 
 def delete_provider(provider_id: str):
-    cfg = _load_config()
-    if provider_id in cfg:
-        cfg[provider_id]["api_key"] = ""
-        cfg[provider_id]["enabled"] = False
-        _save_config(cfg)
+    with _config_lock:
+        cfg = _load_config()
+        if provider_id in cfg:
+            cfg[provider_id]["api_key"] = ""
+            cfg[provider_id]["enabled"] = False
+            _save_config(cfg)
 
 
 # ─── TRANSLATION ─────────────────────────────────────────
@@ -325,9 +331,18 @@ def _apply_results(results: list[str], texts_list: list[dict]):
         if i < len(results) and results[i]:
             t["arabic_text"] = results[i]
 
-def translate_texts(texts: list[dict], provider_id: str, model: str) -> Optional[list[dict]]:
+def translate_texts(texts: list[dict], provider_id: str, model: str,
+                    should_cancel=None) -> Optional[list[dict]]:
     """Smart translation: try batch first, fall back to smaller chunks,
-    only retry lines individually on final pass with rate-limit backoff."""
+    only retry lines individually on final pass with rate-limit backoff.
+    should_cancel (optional callable) aborts between chunks, keeping
+    partial results."""
+
+    def _cancelled():
+        try:
+            return bool(should_cancel and should_cancel())
+        except Exception:
+            return False
     cfg = _load_config()
     p = cfg.get(provider_id)
     if not p:
@@ -385,6 +400,9 @@ def translate_texts(texts: list[dict], provider_id: str, model: str) -> Optional
     print(f"   [STEP2] chunked translate, chunk_size=25...")
     chunk_size = 25
     for chunk_idx, (indices, idx_map_texts) in enumerate(_chunk_with_indices(texts_list, chunk_size)):
+        if _cancelled():
+            print("   [!] cancelled mid-translate — keeping partial results")
+            break
         chunk_tags = [tags[i] for i in indices]
         chunk_tagged = [tagged_texts[i] for i in indices]
         result = _send_with_retry(chunk_tagged, chunk_tags, max_attempts=2)
@@ -396,6 +414,9 @@ def translate_texts(texts: list[dict], provider_id: str, model: str) -> Optional
     if empty_indices:
         print(f"   [STEP3] {len(empty_indices)} empty, translate individually...")
         for idx in empty_indices:
+            if _cancelled():
+                print("   [!] cancelled mid-translate — keeping partial results")
+                break
             t = texts_list[idx]
             single = _translate_single_text(t.get("original_text", ""), p, model)
             if single:

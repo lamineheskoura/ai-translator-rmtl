@@ -47,3 +47,4 @@
 - width = max-width (canonical block geometry). Live width deviations are prior drag-edits, NOT cloned.
 - height = style height. Theme constants: container 970, displayed = min(natural,940), offset = (970-displayed)/2, uniform s both axes.
 - Proven accuracy: Y within 2.3px, X centers exact, 7/8 contract boxes at dx=0.0. Never re-scrape ch158 silently - use refetch (preserves translations).
+- VERIFIED MODEL (do not "fix" without live proof): `x_offset=(970-displayed)/2` ALWAYS applied; `detect_left_mode` boundary uses rendered_w/2 (verified dx=0.0 on samples — leave the detector alone). H0 clamp [0,600] EVERYWHERE (incl. fallbacks); geo_tops deduped against page_texts (no self-corroboration); `calibrate_scale_from_tops` range [0.3,3.0].
