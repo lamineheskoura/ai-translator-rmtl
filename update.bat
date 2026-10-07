@@ -13,6 +13,20 @@ setlocal EnableDelayedExpansion
 set "LOG=%~dp0update.log"
 echo ==== MangaAI Updater - %DATE% %TIME% ==== > "%LOG%"
 echo ==== MangaAI Updater ====
+REM Self-heal step 0: a newer updater saved as update.new.bat takes over
+REM automatically (no rename needed, no reinstall ever).
+if exist "update.new.bat" (
+  fc /b "update.new.bat" "update.bat" >nul 2>nul
+  if errorlevel 1 (
+    echo [*] Switching to the newer updater ...
+    copy /y "update.new.bat" "update.bat" >nul
+    del "update.new.bat" 2>nul
+    call "%~f0"
+    exit /b %errorlevel%
+  ) else (
+    del "update.new.bat" 2>nul
+  )
+)
 set "UPDATE_URL=https://github.com/lamineheskoura/ai-translator-rmtl/releases/latest/download/MangaAI-worker.zip"
 set "BRANCH_URL=https://github.com/lamineheskoura/ai-translator-rmtl/archive/refs/heads/main.zip"
 set "VER_URL=https://raw.githubusercontent.com/lamineheskoura/ai-translator-rmtl/main/VERSION"
@@ -76,9 +90,17 @@ if "!OLDVER!"=="!NEWVER!" (
   if /i "!GO!"=="n" goto done
 )
 set "MANIFEST=%PKGBASE%\MANIFEST.txt"
+set "LEGACY_MODE="
 if not exist "%MANIFEST%" (
-  echo [!] New package has no MANIFEST.txt - aborting, nothing changed.
-  pause & exit /b 1
+  echo [!] Package has no MANIFEST.txt - using built-in legacy list instead.
+  echo #legacy > "%TEMP%\MangaAI-legacy-manifest.txt"
+  echo D editor>> "%TEMP%\MangaAI-legacy-manifest.txt"
+  echo D scraper>> "%TEMP%\MangaAI-legacy-manifest.txt"
+  echo D translator>> "%TEMP%\MangaAI-legacy-manifest.txt"
+  echo D fonts>> "%TEMP%\MangaAI-legacy-manifest.txt"
+  for %%F in (main.py requirements.txt install.bat start_server.bat update.bat package.bat smoke.bat .env.example .gitignore README.md README-WORKERS.txt VERSION MANIFEST.txt CONTRACTS.md) do echo F %%F>> "%TEMP%\MangaAI-legacy-manifest.txt"
+  set "MANIFEST=%TEMP%\MangaAI-legacy-manifest.txt"
+  set "LEGACY_MODE=1"
 )
 echo [*] Backing up current code to _backup-v!OLDVER! ...
 if exist "_backup-v!OLDVER!" rmdir /s /q "_backup-v!OLDVER!"
@@ -130,8 +152,8 @@ echo.
 echo [+] Updated to !NEWVER!. Your chapters, keys and settings are untouched.
 echo     Old code backup: _backup-v!OLDVER!\  (delete it when all is fine)
 if defined SELFUPDATED (
-  echo     NOTE: the updater itself changed - it is saved as update.new.bat.
-  echo     Rename it to update.bat to use the new updater next time.
+  echo     NOTE: the updater itself was refreshed too - it activates
+  echo     automatically next time you run update.bat. Nothing to rename.
 )
 echo     Now launch start_server.bat
 :done
