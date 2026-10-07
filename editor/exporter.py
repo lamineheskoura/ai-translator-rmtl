@@ -64,6 +64,10 @@ TEXT_PADDING = 6
 # appears and the shrink loop collapses sizes needlessly.
 LATIN_WIDTH_FACTOR = 0.8
 
+# Smart-fit result boost (experimental, user-tuned): fitted sizes are
+# enlarged by this factor when they still fit the box. Never shrinks.
+AUTO_FIT_BOOST = 1.25
+
 
 def find_font_path(font_name: str) -> Optional[str]:
     for f in get_available_fonts():
@@ -242,6 +246,25 @@ def measure_fitted(draw, text: str, font_path: str, start_size: int,
     return fitted, font, wrapped, line_widths, line_heights, base_lh, total_h
 
 
+def boost_fitted(draw, text: str, font_path: str, fitted: int,
+                 max_w: float, max_h: float, line_height_factor: float = 1.2,
+                 line_gap: int = 2) -> int:
+    """Enlarge a fitted size by AUTO_FIT_BOOST while it still fits.
+
+    Never goes below `fitted`. Returns the boosted (or original) size.
+    """
+    try:
+        target = min(120, int(round(fitted * AUTO_FIT_BOOST)))
+    except Exception:
+        return fitted
+    if target <= fitted:
+        return fitted
+    bfit, _, _, _, _, _, _ = measure_fitted(
+        draw, text, font_path, target, max_w, max_h,
+        line_height_factor, line_gap, min_size=fitted)
+    return max(fitted, bfit)
+
+
 def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                           margin: float = 6.0, line_gap: int = 2) -> dict:
     """Grow boxes (down only) so translated text fits at site size.
@@ -296,9 +319,12 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             fitted, _, _, _, _, _, _ = measure_fitted(
                 draw, arabic, font_path, start_size, max_w, max_h, lh, line_gap)
             if fitted >= start_size:
+                final = start_size
                 if start_size > site_size:
-                    style["font_size"] = int(start_size)
-                    t["font_size_px"] = float(start_size)
+                    final = boost_fitted(draw, arabic, font_path, start_size,
+                                         max_w, max_h, lh, line_gap)
+                    style["font_size"] = int(final)
+                    t["font_size_px"] = float(final)
                     t["style"] = style
                 kept += 1
                 continue
@@ -327,8 +353,10 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 shrunk += 1
             else:
                 kept += 1
-            style["font_size"] = int(fitted)
-            t["font_size_px"] = float(fitted)
+            final = boost_fitted(draw, arabic, font_path, fitted,
+                                 max_w, max_h, lh, line_gap)
+            style["font_size"] = int(final)
+            t["font_size_px"] = float(final)
             t["style"] = style
     return {"grown": grown, "shrunk": shrunk, "kept": kept, "skipped": skipped}
 
