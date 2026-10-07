@@ -381,6 +381,23 @@ def _normalize_chapter_data(data: dict):
         page_num = page.get("page")
         texts = page.get("texts", []) or []
         page["texts"] = [_normalize_text_obj(t, page_num) for t in texts if t.get("id")]
+        # Hard cap: no box may exceed its page (save-time choke point —
+        # covers panel/resize/PUT/drag in one place).
+        try:
+            pw = float(page.get("width", 0) or 0)
+        except Exception:
+            pw = 0
+        if pw > 20:
+            for t in page["texts"]:
+                try:
+                    w = min(float(t.get("width", 200) or 200), pw - 8.0)
+                    w = max(20.0, w)
+                    x = min(max(float(t.get("x", 0) or 0), 0.0),
+                            max(0.0, pw - w))
+                    t["width"] = round(w, 2)
+                    t["x"] = round(x, 2)
+                except Exception:
+                    continue
         total_texts += len(page["texts"])
     data["total_texts"] = total_texts
 
@@ -761,6 +778,7 @@ def scrape_new(url: str = Query(..., description="Chapter URL"),
             "chapter": None,
             "error": None,
             "done": False,
+            "cancel_requested": False,
             "started_at": time.time(),
         }
         # keep only the last 50 tasks (drop oldest FINISHED first —
@@ -773,14 +791,24 @@ def scrape_new(url: str = Query(..., description="Chapter URL"),
 
     def _run_scrape():
         try:
-            from scraper.coordinator import scrape_chapter
+            from scraper.coordinator import scrape_chapter, ScrapeCancelled
+
+            def _task_cancelled():
+                with scrape_tasks_lock:
+                    t = scrape_tasks.get(task_id)
+                    return bool(t and t.get("cancel_requested"))
+
             print(f"[i] Scrape task {task_id[:8]} starting for {url} (browser={browser}, headless={headless})", flush=True)
-            ch_dir = scrape_chapter(url, headless=headless, browser=browser)
+            ch_dir = scrape_chapter(url, headless=headless, browser=browser,
+                                    should_cancel=_task_cancelled)
             with scrape_tasks_lock:
                 t = scrape_tasks.get(task_id)
                 if t is None:
                     return
-                if ch_dir:
+                if t.get("cancel_requested"):
+                    t["status"] = "cancelled"
+                    t["log"] += "\n✗ أُلغي من المستخدم\n"
+                elif ch_dir:
                     t["status"] = "ok"
                     t["slug"] = ch_dir.parent.name
                     t["chapter"] = ch_dir.name.replace("chapter_", "")
@@ -789,6 +817,14 @@ def scrape_new(url: str = Query(..., description="Chapter URL"),
                     t["status"] = "error"
                     t["error"] = "فشل التحميل - لم يتم العثور على صور"
                     t["log"] += "\n✗ لم يتم العثور على صور\n"
+        except ScrapeCancelled:
+            print(f"[i] Scrape task {task_id[:8]} cancelled by user", flush=True)
+            with scrape_tasks_lock:
+                t = scrape_tasks.get(task_id)
+                if t is None:
+                    return
+                t["status"] = "cancelled"
+                t["log"] += "\n✗ أُلغي من المستخدم\n"
         except Exception as e:
             print(f"[!] Scrape task {task_id[:8]} error: {e}", flush=True)
             with scrape_tasks_lock:
@@ -806,6 +842,19 @@ def scrape_new(url: str = Query(..., description="Chapter URL"),
     t = threading.Thread(target=_run_scrape, daemon=True)
     t.start()
     return {"status": "started", "task_id": task_id}
+
+
+@app.post("/api/scrape/cancel/{task_id}")
+def cancel_scrape_task(task_id: str):
+    with scrape_tasks_lock:
+        t = scrape_tasks.get(task_id)
+        if not t:
+            raise HTTPException(404, "Task not found")
+        if t.get("done") or t.get("status") in ("ok", "error", "cancelled"):
+            return {"status": t.get("status"), "task_id": task_id,
+                    "note": "already finished — nothing to cancel"}
+        t["cancel_requested"] = True
+    return {"status": "cancelling", "task_id": task_id}
 
 
 @app.get("/api/scrape/task/{task_id}")
@@ -1287,9 +1336,11 @@ def _load_queue():
                         j["error"] = "interrupted by restart"
                     batch_jobs[jid] = j
                     if j.get("status") == "queued":
-                        # Re-arm jobs that never started: else the worker
-                        # blocks on an empty queue forever after restart.
-                        _batch_queue.put(jid)
+                        # Reloaded jobs start PAUSED — never auto-run behind
+                        # the user's back after a restart. User resumes.
+                        j["status"] = "paused"
+                        j["paused_from"] = "queued"
+                        j["log"] = (j.get("log") or "") + "⏸ متوقف بعد إعادة التشغيل — اضغط استئناف\n"
     except Exception:
         pass
 
@@ -1371,7 +1422,7 @@ def _batch_worker():
             if not job:
                 continue
             with batch_lock:
-                if job.get("status") == "cancelled":
+                if job.get("status") in ("cancelled", "paused"):
                     continue
                 job["status"] = "scraping"
                 job["progress"] = 5
@@ -1650,10 +1701,49 @@ def cancel_queue_job(job_id: str):
             return {"status": job.get("status"), "job_id": job_id,
                     "note": "already terminal — nothing to cancel"}
         job["cancel_requested"] = True
-        if job.get("status") == "queued":
+        if job.get("status") in ("queued", "paused"):
             job["status"] = "cancelled"
     _save_queue()
     return {"status": "cancelled", "job_id": job_id}
+
+
+@app.post("/api/queue/resume/{job_id}")
+def resume_queue_job(job_id: str):
+    with batch_lock:
+        job = batch_jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        if job.get("status") != "paused":
+            return {"status": job.get("status"), "job_id": job_id,
+                    "note": "not paused — nothing to resume"}
+        job.pop("cancel_requested", None)
+        job["status"] = "queued"
+        job["progress"] = 0
+        old_log = job.get("log") or ""
+        job["log"] = (old_log[-2000:] + "\n▶ استئناف من المستخدم\n") if old_log else "▶ استئناف\n"
+    _batch_queue.put(job_id)
+    _save_queue()
+    return {"status": "queued", "job_id": job_id}
+
+
+@app.post("/api/batch/{batch_id}/resume")
+def resume_batch(batch_id: str):
+    with batch_lock:
+        b = batches.get(batch_id)
+        if not b:
+            raise HTTPException(404, "Batch not found")
+        resumed = []
+        for jid in b.get("job_ids", []):
+            j = batch_jobs.get(jid)
+            if j and j.get("status") == "paused":
+                j.pop("cancel_requested", None)
+                j["status"] = "queued"
+                j["progress"] = 0
+                resumed.append(jid)
+    for jid in resumed:
+        _batch_queue.put(jid)
+    _save_queue()
+    return {"status": "ok", "resumed": len(resumed), "job_ids": resumed}
 
 
 @app.post("/api/batch/{batch_id}/retry-failed")

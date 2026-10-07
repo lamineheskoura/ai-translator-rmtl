@@ -314,6 +314,14 @@ def assign_texts_to_images(
         page_css_start = css_cumulative[page_idx] + h0
         page_css_end = css_cumulative[page_idx + 1] + h0
         page_width, page_height = png_dims[page_idx]
+        if page_width <= 0:
+            # PIL dimension probe failed: fall back to the chapter's
+            # displayed width so the X-safety clamps below still hold
+            # instead of storing unbounded boxes.
+            try:
+                page_width = float(_displayed or 800.0)
+            except Exception:
+                page_width = 800.0
 
         texts = page_texts.get(page_idx, [])
         page_texts_out = []
@@ -431,7 +439,8 @@ def assign_texts_to_images(
     return results
 
 
-def process_chapter(driver, url: str, slug: str, ch_num: str, base_dir: Path):
+def process_chapter(driver, url: str, slug: str, ch_num: str, base_dir: Path,
+                    should_cancel=None):
     # Legacy Selenium path (fallback). Requires selenium + engine.
     if not _SELENIUM_AVAILABLE or not _ENGINE_AVAILABLE or parse_chapter_full is None:
         print("[!] Legacy Selenium path unavailable (selenium not installed).")
@@ -483,6 +492,7 @@ def process_chapter(driver, url: str, slug: str, ch_num: str, base_dir: Path):
     if not raw_paths:
         print("[-] Download failed.")
         return None
+    _throw_if_cancelled(should_cancel)
 
     print(f"\n[>] Converting to PNG...")
     png_paths = convert_all_to_png(raw_paths, pages_dir)
@@ -532,7 +542,23 @@ def process_chapter(driver, url: str, slug: str, ch_num: str, base_dir: Path):
     return ch_dir
 
 
-def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path):
+class ScrapeCancelled(Exception):
+    """Raised at stage boundaries when the user cancels a scrape task."""
+    pass
+
+
+def _throw_if_cancelled(should_cancel):
+    try:
+        if should_cancel is not None and should_cancel():
+            raise ScrapeCancelled("cancelled by user")
+    except ScrapeCancelled:
+        raise
+    except Exception:
+        pass
+
+
+def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path,
+                           should_cancel=None):
     """New primary path: Scrapling spider + pipeline (no Selenium)."""
     from .spider import fetch_chapter_page
     from .pipeline import (
@@ -549,6 +575,7 @@ def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path):
     if result is None:
         print("[-] Spider fetch failed.")
         return None
+    _throw_if_cancelled(should_cancel)
     if len(result) == 6:
         image_urls, page_texts, rendered_w, css_heights, title, geo_tops = result
     else:  # backward compat with 5-tuple callers
@@ -574,6 +601,7 @@ def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path):
     if not raw_paths:
         print("[-] Download failed.")
         return None
+    _throw_if_cancelled(should_cancel)
 
     print(f"\n[>] Converting to PNG...")
     png_paths = convert_all_to_png(raw_paths, pages_dir)
@@ -603,6 +631,7 @@ def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path):
     pages_data = assign_texts_to_images(page_texts, png_dims, scale, css_heights,
                                         trust_page_id=True, geo_tops=geo_tops)
     assigned_texts = sum(len(p["texts"]) for p in pages_data)
+    _throw_if_cancelled(should_cancel)
 
     print(f"\n[>] Saving chapter data...")
     chapter_data = {
@@ -654,7 +683,8 @@ def _resolve_base_root() -> Path:
     return Path.cwd() / "output"
 
 
-def scrape_chapter(url: str, headless: bool = True, browser: str = "brave"):
+def scrape_chapter(url: str, headless: bool = True, browser: str = "brave",
+                   should_cancel=None):
     slug, ch_num = extract_chapter_info(url)
     if not slug:
         print("[!] Could not parse chapter URL.")
@@ -683,11 +713,14 @@ def scrape_chapter(url: str, headless: bool = True, browser: str = "brave"):
     # Attempt 1: new Scrapling spider + pipeline path
     try:
         print("\n[i] Trying Scrapling spider path...")
-        ch_dir = process_chapter_spider(url, slug, ch_num, base_dir)
+        ch_dir = process_chapter_spider(url, slug, ch_num, base_dir,
+                                        should_cancel=should_cancel)
         if ch_dir is not None:
             return ch_dir
         spider_reason = "spider returned no data"
         print("   [!] Spider path returned None - falling back to Selenium.")
+    except ScrapeCancelled:
+        raise
     except Exception as e:
         spider_reason = str(e)[:300]
         print(f"   [!] Spider path failed ({spider_reason}) - falling back to Selenium.")
@@ -697,6 +730,7 @@ def scrape_chapter(url: str, headless: bool = True, browser: str = "brave"):
         raise RuntimeError(
             "فشل المسار الأساسي (spider): " + (spider_reason or "unknown") +
             ". ولا يوجد مسار Selenium احتياطي على هذا الجهاز.")
+    _throw_if_cancelled(should_cancel)
     print(f"\n[i] Starting {browser} (headless={headless})...")
     try:
         driver = setup_driver(headless=headless, browser=browser)
@@ -705,7 +739,8 @@ def scrape_chapter(url: str, headless: bool = True, browser: str = "brave"):
             "فشل المسار الأساسي (spider): " + (spider_reason or "unknown") +
             f". وفشل الاحتياطي (selenium): {e}")
     try:
-        ch_dir = process_chapter(driver, url, slug, ch_num, base_dir)
+        ch_dir = process_chapter(driver, url, slug, ch_num, base_dir,
+                                 should_cancel=should_cancel)
         return ch_dir
     finally:
         driver.quit()

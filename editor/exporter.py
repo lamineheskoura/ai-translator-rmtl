@@ -68,6 +68,10 @@ LATIN_WIDTH_FACTOR = 0.8
 # enlarged by this factor when they still fit the box. Never shrinks.
 AUTO_FIT_BOOST = 1.25
 
+# Global Arabic minimum: auto-fit NEVER goes below this (user rule).
+# Manual overrides still win — explicit intent beats auto.
+ARABIC_MIN_FONT = 14
+
 
 def find_font_path(font_name: str) -> Optional[str]:
     for f in get_available_fonts():
@@ -244,7 +248,7 @@ def measure_fitted(draw, text: str, font_path: str, start_size: int,
     (site proves it fits); translated text shrinks to min_size if needed.
     Returns (fitted_size, font_or_None, wrapped, line_widths, total_h).
     """
-    floor = start_size if not _has_arabic(text) else min_size
+    floor = start_size if not _has_arabic(text) else max(min_size, ARABIC_MIN_FONT)
     fitted = max(start_size, min_size)
     font = None
     wrapped, line_widths, line_heights, base_lh, total_h = [""], [0], [0], 0, 0
@@ -294,6 +298,154 @@ def _effective_stroke(style: dict, force_stroke: bool = True,
         return 0.0
     except Exception:
         return 0.0
+
+
+def _grow_width(draw, text: str, font_path: str, size: int,
+                x: float, y: float, w: float, h: float, w_orig: float,
+                h_orig: float, page_w: float, page_h: float, texts: list,
+                idx: int, lh: float, line_gap: int, margin: float,
+                max_grow: float, mstroke: float = 0.0,
+                next_top: float = 0.0):
+    """Grow the box WIDTH (symmetric around center) to hold `size`.
+
+    Hard caps: page width, same-row neighbor boxes, w_orig*max_grow.
+    Width goes FIRST (unwrapping lines reduces the height needed).
+    When vertical growth is blocked (next_top), width COMPENSATES: it
+    widens toward the single-line width divided by the lines the
+    current height allows. Returns (x, w, max_w, pad_x, grew_bool).
+    """
+    pad_x = min(6.0, max(2.0, w * 0.02))
+    pad_y = min(6.0, max(2.0, h * 0.10))
+    max_w = max(1, w - pad_x * 2)
+    max_h = max(1, h - pad_y * 2)
+    try:
+        vcap = min(float(page_h or 0) - y - 4.0,
+                   float(next_top or 0) - y - float(margin),
+                   float(h_orig or h) * float(max_grow))
+    except Exception:
+        vcap = h + 1.0
+    vblocked = vcap <= h + 1.0
+    try:
+        _, _, _, line_widths, _, _, _ = measure_fitted(
+            draw, text, font_path, size, max_w, max_h, lh, line_gap,
+            mstroke, size)  # pinned: measure overflow, don't shrink
+    except Exception:
+        return x, w, max_w, pad_x, False
+    widest = max(line_widths) if line_widths else 0
+    need_w = widest + mstroke * 2 + pad_x * 2 + 2
+    if need_w <= w and not vblocked:
+        return x, w, max_w, pad_x, False
+    if page_w > 20:
+        left_lim, right_lim = 4.0, page_w - 4.0
+    else:
+        left_lim, right_lim = 4.0, x + w - 4.0
+    for j, other in enumerate(texts):
+        if j == idx:
+            continue
+        try:
+            ox = float(other.get("x", 0) or 0)
+            oy = float(other.get("y", 0) or 0)
+            ow = max(20.0, float(other.get("width", 200) or 200))
+            oh = max(10.0, float(other.get("height", 60) or 60))
+        except Exception:
+            continue
+        if oy < y + h and y < oy + oh:  # same row: respect horizontally
+            if ox + ow <= x:
+                left_lim = max(left_lim, ox + ow + margin)
+            elif ox >= x + w:
+                right_lim = min(right_lim, ox - margin)
+    cap_w = min(right_lim - left_lim, w_orig * max_grow)
+    if page_w > 20:
+        cap_w = min(cap_w, page_w - 8.0)
+    # Smart compensation: if vertical growth is blocked (a neighbor sits
+    # right below), widen FURTHER so the text fits in the lines the
+    # current height allows — width substitutes for height.
+    if vblocked and cap_w > w:
+        try:
+            line_px = max(1.0, float(size) * float(lh) + float(line_gap))
+            lines_avail = max(1, int(max_h / line_px))
+            fnt0 = _load_font(font_path, int(size))
+            if fnt0 is not None:
+                total_w = draw.textbbox((0, 0), " ".join(
+                    (text or "").split()), font=fnt0)[2]
+                w_target = (total_w / lines_avail + mstroke * 2
+                            + pad_x * 2 + 4)
+                need_w = max(need_w, min(w_target, cap_w))
+        except Exception:
+            pass
+    if cap_w <= w:
+        return x, w, max_w, pad_x, False
+    w2 = min(need_w, cap_w)
+    cx = x + w / 2.0
+    x2 = min(max(cx - w2 / 2.0, left_lim), max(left_lim, right_lim - w2))
+    if page_w > 20:
+        x2 = min(max(x2, 4.0), max(4.0, page_w - w2 - 4.0))
+    pad_x2 = min(6.0, max(2.0, w2 * 0.02))
+    return x2, w2, max(1, w2 - pad_x2 * 2), pad_x2, True
+
+
+def _separate_overlaps(texts: list, page_h: float, gap: float = 3.0):
+    """Post-pass: guarantee a >=gap px vertical gap between x-overlapping
+    boxes (push DOWN only, never above original y; clamp at page bottom).
+    A single forward pass cascades correctly (uses pushed bottoms).
+    Returns count of moved boxes.
+    """
+    moved = 0
+    try:
+        max_bottom = float(page_h or 0) - 4.0
+    except Exception:
+        return 0
+    orig_y = {}
+    for t in texts:
+        try:
+            orig_y[id(t)] = float(t.get("y", 0) or 0)
+        except Exception:
+            continue
+    for i, cur in enumerate(texts):
+        try:
+            cx = float(cur.get("x", 0) or 0)
+            cy = float(cur.get("y", 0) or 0)
+            cw = max(20.0, float(cur.get("width", 200) or 200))
+            ch = max(10.0, float(cur.get("height", 60) or 60))
+        except Exception:
+            continue
+        req = cy
+        for prev in texts[:i]:
+            try:
+                px = float(prev.get("x", 0) or 0)
+                py = float(prev.get("y", 0) or 0)
+                pw = max(20.0, float(prev.get("width", 200) or 200))
+                ph = max(10.0, float(prev.get("height", 60) or 60))
+            except Exception:
+                continue
+            if px < cx + cw and cx < px + pw and py <= cy:
+                req = max(req, py + ph + gap)
+        if req > cy:
+            ny = max(orig_y.get(id(cur), cy), req)
+            if ny + ch > max_bottom:
+                ch = max(10.0, max_bottom - ny)
+            if ny + ch >= req:
+                cur["y"] = round(ny, 2)
+                cur["height"] = round(ch, 2)
+                moved += 1
+    return moved
+
+
+def _next_top(texts: list, idx: int, x: float, y: float, w: float,
+              page_h: float) -> float:
+    """Top of the first box below (with horizontal overlap)."""
+    next_top = page_h
+    for other in texts[idx + 1:]:
+        try:
+            oy = float(other.get("y", 0) or 0)
+            ox = float(other.get("x", 0) or 0)
+            ow = max(20.0, float(other.get("width", 200) or 200))
+        except Exception:
+            continue
+        if oy > y and ox < x + w and x < ox + ow:
+            next_top = min(next_top, oy)
+            break
+    return next_top
 
 
 def _fit_or_grow(draw, text: str, font_path: str, size: int, floor: int,
@@ -351,7 +503,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
     Then fit the font (recorded into style) — shrink only as last resort.
     Mutates chapter_data in place. Returns counts dict.
     """
-    grown = shrunk = kept = skipped = boosted = 0
+    grown = shrunk = kept = skipped = boosted = separated = 0
     work = Image.new("RGB", (8, 8), (255, 255, 255))
     draw = ImageDraw.Draw(work)
     for page in chapter_data.get("pages", []):
@@ -364,6 +516,9 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             continue
         texts = sorted((page.get("texts", []) or []),
                        key=lambda t: float(t.get("y", 0) or 0))
+        # Pre-pass: input boxes may already overlap (broken scrape/drag).
+        # Separate FIRST so growth caps are computed against clean gaps.
+        separated += _separate_overlaps(texts, page_h, gap=3.0)
         for idx, t in enumerate(texts):
             arabic = (t.get("arabic_text") or "").strip()
             if not arabic:
@@ -384,6 +539,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 continue
             mstroke = _effective_stroke(style, force_stroke, export_stroke_width)
             h_orig = h
+            w_orig = w
             text_grew = False
             font_path = _pick_font_path(font_name, arabic)
             if not font_path:
@@ -402,17 +558,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 draw, arabic, font_path, start_size, max_w, max_h, lh,
                 line_gap, mstroke)
             # Next box top (shared by the pre-grow and the overflow guard).
-            next_top = page_h
-            for other in texts[idx + 1:]:
-                try:
-                    oy = float(other.get("y", 0) or 0)
-                    ox = float(other.get("x", 0) or 0)
-                    ow = max(20.0, float(other.get("width", 200) or 200))
-                except Exception:
-                    continue
-                if oy > y and ox < x + w and x < ox + ow:
-                    next_top = min(next_top, oy)
-                    break
+            next_top = _next_top(texts, idx, x, y, w, page_h)
             if fitted >= start_size:
                 # Fits (at site size or area size) -> apply the forced +25%
                 # on the fitted number itself, ALWAYS (even at site size).
@@ -421,6 +567,19 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                                      max_w, max_h, lh, line_gap)
                 if final > start_size:
                     boosted += 1
+                # Width FIRST (unwraps lines, reduces height need), then height.
+                x, w, max_w, pad_x, wgrew = _grow_width(
+                    draw, arabic, font_path, final, x, y, w, h, w_orig,
+                    h_orig, page_w, page_h, texts, idx, lh, line_gap,
+                    margin, max_grow, mstroke, next_top)
+                if wgrew:
+                    if not text_grew:
+                        grown += 1
+                        text_grew = True
+                    t["x"] = round(x, 2)
+                    t["width"] = round(w, 2)
+                    # Widening may now overlap boxes it didn't before.
+                    next_top = _next_top(texts, idx, x, y, w, page_h)
                 final, h, grew = _fit_or_grow(
                     draw, arabic, font_path, final, start_size,
                     max_w, max_h, lh, line_gap, y, h, h_orig, page_h,
@@ -455,6 +614,19 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                                  max_w, max_h, lh, line_gap)
             if final > pre:
                 boosted += 1
+            # Width FIRST (unwraps lines, reduces height need), then height.
+            x, w, max_w, pad_x, wgrew = _grow_width(
+                draw, arabic, font_path, final, x, y, w, h, w_orig,
+                h_orig, page_w, page_h, texts, idx, lh, line_gap,
+                margin, max_grow, mstroke, next_top)
+            if wgrew:
+                if not text_grew:
+                    grown += 1
+                    text_grew = True
+                t["x"] = round(x, 2)
+                t["width"] = round(w, 2)
+                # Widening may now overlap boxes it didn't before.
+                next_top = _next_top(texts, idx, x, y, w, page_h)
             final, h, grew = _fit_or_grow(
                 draw, arabic, font_path, final, pre,
                 max_w, max_h, lh, line_gap, y, h, h_orig, page_h,
@@ -466,8 +638,12 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             style["font_size"] = int(final)
             t["font_size_px"] = float(final)
             t["style"] = style
+        # Post-pass: no two x-overlapping boxes may touch — guarantee a
+        # >=3px gap (survives int() truncation at render as >=1px).
+        separated += _separate_overlaps(texts, page_h, gap=3.0)
     return {"grown": grown, "shrunk": shrunk, "kept": kept,
-            "skipped": skipped, "boosted": boosted}
+            "skipped": skipped, "boosted": boosted,
+            "separated": separated}
 
 
 

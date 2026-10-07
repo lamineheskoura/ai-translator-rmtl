@@ -19,8 +19,15 @@
 - الموقع/السكرابر يحدد الحجم؛ الملاءمة تصغّر عند الفيض فقط.
 - بعد الملاءمة: `AUTO_FIT_BOOST=1.25` في `exporter.py` يضرب الناتج ×1.25
   **بلا إعادة تحقق** (أمر المستخدم الصريح: الزيادة على رقم الملاءمة نفسه).
+- `ARABIC_MIN_FONT=14` (مصدّر + محرر): الملاءمة التلقائية لا تنزل تحته
+  أبداً للعربي؛ EN لا يُمس (أرضيته = حجم الموقع)؛ التجاوز اليدوي (6+) يبقى.
+- النمو ذكي ثنائي البعد: العرض أولاً (متماثل حول المركز، سقف عرض الصفحة
+  والجيران الأفقيين)، ثم الطول لأسفل؛ عند انسداد الطول يعوّض العرض
+  (العرض بديل الارتفاع). فصل لاحق يضمن فجوة ≥3px (أي ≥1px بعد int).
 - الضبط التلقائي عند فتح الفصل في المحرر **لا** يعزز (منع التضاعف
   التراكمي)؛ التعزيز يأتي فقط من زر "ضبط ذكي" (الخادم) وعامل الدفعات.
+- قياس المحرر = قياس المصدّر: إزاحة تكيفية (لا 0.96)، طرح الـpadding من
+  المقاس (لا عدّ مزدوج)، احتياطي ستروك، line_gap=2، معامل لاتيني 0.8.
 - `TEXT_PADDING=6` في المصدّر **و** `padding 6px` في المحرر/القياس — الثلاثة معاً أو لا شيء.
 - `rendered_w=800.0` في spider ثابت عمداً (يجبر مسار تقدير PNG).
 
@@ -48,3 +55,11 @@
 - height = style height. Theme constants: container 970, displayed = min(natural,940), offset = (970-displayed)/2, uniform s both axes.
 - Proven accuracy: Y within 2.3px, X centers exact, 7/8 contract boxes at dx=0.0. Never re-scrape ch158 silently - use refetch (preserves translations).
 - VERIFIED MODEL (do not "fix" without live proof): `x_offset=(970-displayed)/2` ALWAYS applied; `detect_left_mode` boundary uses rendered_w/2 (verified dx=0.0 on samples — leave the detector alone). H0 clamp [0,600] EVERYWHERE (incl. fallbacks); geo_tops deduped against page_texts (no self-corroboration); `calibrate_scale_from_tops` range [0.3,3.0].
+
+## 8) عقد المهام (الخلفية مرئية دائماً)
+- مهام الطابور بعد إعادة التشغيل تبدأ **PAUSED** (لا تشغيل ذاتي أبداً)؛
+  الاستئناف عبر `POST /api/queue/resume/{job}` أو `/api/batch/{id}/resume`.
+- السكراب المفرد قابل للإلغاء (`POST /api/scrape/cancel/{task}` + نقاط
+  فحص بين المراحل)؛ الإلغاء يتخلى عن النتائج ولا يقتل الخيط بعنف.
+- درج المهام (`#tasks-drawer` + شارة `#tasks-badge`) يعرض كل نشط دائماً
+  خارج المودالات: إلغاء/استئناف/إعادة إرفاق. لا تُخفِ حالة خلفية أبداً.

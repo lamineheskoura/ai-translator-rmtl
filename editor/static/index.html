@@ -40,9 +40,19 @@
     <div class="menubar-right">
       <span id="chapter-title-display" class="chapter-label" title="اسم الفصل الحالي">لا يوجد فصل مفتوح — اختر فصلاً</span>
       <span class="menubar-sep" aria-hidden="true"></span>
+      <button id="tasks-badge" class="menu-btn hidden" onclick="toggleTasksDrawer()" title="مهام جارية في الخلفية (اضغط للعرض/الإلغاء)">مهام <span id="tasks-badge-count">0</span></button>
       <button class="menu-btn menu-btn-danger" onclick="shutdownServer()" title="إيقاف التطبيق">إيقاف</button>
     </div>
   </header>
+
+  <!-- ===== BACKGROUND TASKS DRAWER (persistent, outside modals) ===== -->
+  <div id="tasks-drawer" class="hidden">
+    <div class="tasks-drawer-head">
+      <strong>المهام الجارية</strong>
+      <button class="menu-btn" onclick="toggleTasksDrawer()" title="إغلاق">✕</button>
+    </div>
+    <div id="tasks-drawer-items"></div>
+  </div>
 
   <!-- ===== DOWNLOAD QUEUE ===== -->
   <div id="download-bar" class="hidden">

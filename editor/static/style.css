@@ -1034,3 +1034,13 @@ body.mode-view .text-overlay.selected { border-color: var(--border-light); backg
   font-family: var(--font-mono);
 }
 #batch-status, #scrape-status { direction: ltr; text-align: left; }
+/* Background tasks drawer: always reachable, survives closed modals. */
+#tasks-badge { border-color: var(--accent); color: var(--accent); font-weight: bold; }
+#tasks-drawer {
+  position: fixed; top: 52px; inset-inline-end: 12px; width: 340px; max-height: 60vh;
+  overflow-y: auto; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35); z-index: 900; padding: 10px 12px;
+}
+.tasks-drawer-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.tasks-drawer-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.tasks-drawer-row .t-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

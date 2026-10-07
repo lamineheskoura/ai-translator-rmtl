@@ -342,7 +342,23 @@ function fitPadding(w, h) {
   return [px, py];
 }
 
-function measureTextFit(text, fontFamily, fontSize, lineHeight, boxWidth, boxHeight) {
+// Stroke pixels the exporter reserves (mirror of _effective_stroke):
+// enabled -> max(1, width), disabled -> force-stroke default 1.5.
+function effectiveStrokeReserve(t) {
+  try {
+    const st = (t && t.style) || {};
+    let enabled = st.stroke_enabled !== undefined ? st.stroke_enabled : true;
+    if (typeof enabled === 'string') enabled = !['false', '0', ''].includes(enabled.toLowerCase());
+    else if (typeof enabled === 'number') enabled = !!enabled;
+    if (enabled) {
+      const sw = parseFloat(st.stroke_width);
+      return isNaN(sw) ? 1 : Math.max(1, sw);
+    }
+    return 1.5;
+  } catch (e) { return 1; }
+}
+
+function measureTextFit(text, fontFamily, fontSize, lineHeight, boxWidth, boxHeight, strokeReserve = 0, lineGap = 2) {
   const measurer = getTextMeasurer();
   measurer.style.width = Math.max(20, boxWidth) + 'px';
   measurer.style.fontFamily = fontFamily;
@@ -352,14 +368,24 @@ function measureTextFit(text, fontFamily, fontSize, lineHeight, boxWidth, boxHei
   measurer.style.padding = pad[1] + 'px ' + pad[0] + 'px';
   measurer.textContent = text && text.trim() ? text : 'نص';
 
-  const h = measurer.scrollHeight;
-  let w = Math.min(measurer.scrollWidth, Math.max(20, boxWidth));
+  // CONTENT-box comparison (parity with measure_fitted): scrollWidth/Height
+  // include the measurer padding — subtract it instead of double-counting.
+  const hRaw = measurer.scrollHeight;
+  const wRaw = Math.min(measurer.scrollWidth, Math.max(20, boxWidth));
+  const hContent = Math.max(0, hRaw - pad[1] * 2);
+  let wContent = Math.max(0, wRaw - pad[0] * 2);
   // Latin parity with the exporter (LATIN_WIDTH_FACTOR=0.8): the render
   // font measures wider than the site font — scale down identically.
-  if (!hasArabicChars(text || '')) w = w * 0.8;
-  const estimatedLineCount = Math.max(1, Math.round(h / Math.max(1, fontSize * lineHeight)));
-  return { width: w, height: h, lineCount: estimatedLineCount };
+  if (!hasArabicChars(text || '')) wContent = wContent * 0.8;
+  const estimatedLineCount = Math.max(1, Math.round(hContent / Math.max(1, fontSize * lineHeight)));
+  // Exporter adds line_gap per line break — mirror it.
+  const h = hContent + (estimatedLineCount - 1) * (lineGap || 0);
+  return { width: wContent, height: h, lineCount: estimatedLineCount };
 }
+
+// Global Arabic minimum: auto-fit NEVER goes below this (user rule).
+// Manual slider/panel overrides (min 6) still win — explicit intent beats auto.
+const ARABIC_MIN_FONT = 14;
 
 // Box-area starting size: s = 0.6 * sqrt(boxArea / chars), clamped.
 // Calibrated: 975x233 narration with ~280 Arabic chars -> ~17px (site size).
@@ -368,7 +394,7 @@ function areaGuessSize(text, boxW, boxH) {
   const n = Math.max(1, clean.length);
   const area = Math.max(400, (parseFloat(boxW) || 200) * (parseFloat(boxH) || 60));
   const s = 0.6 * Math.sqrt(area / n);
-  return Math.max(8, Math.min(120, Math.round(s)));
+  return Math.max(ARABIC_MIN_FONT, Math.min(120, Math.round(s)));
 }
 
 // Deterministic smart size from box + char count (no DOM needed):
@@ -382,12 +408,12 @@ function estimateSmartSize(text, boxW, boxH, lineHeight) {
   const [padX, padY] = fitPadding(boxW, boxH);
   const fitW = Math.max(1, boxW - padX * 2);
   const fitH = Math.max(1, boxH - padY * 2);
-  for (let size = 120; size >= 8; size--) {
+  for (let size = 120; size >= ARABIC_MIN_FONT; size--) {
     const perLine = Math.max(1, Math.floor(fitW / (size * r)));
     const lines = Math.ceil(n / perLine);
-    if (lines * size * lineHeight <= fitH) return size;
+    if (lines * size * lineHeight + (lines - 1) * 2 <= fitH) return size;
   }
-  return 8;
+  return ARABIC_MIN_FONT;
 }
 
 function computeSmartFontSize(t, allowGrow = false) {
@@ -397,20 +423,24 @@ function computeSmartFontSize(t, allowGrow = false) {
   const text = (t.arabic_text || t.original_text || '').trim();
   const cur = Math.max(8, Math.min(200, parseInt(t.style?.font_size || t.font_size_px || 45, 10) || 45));
   if (!text) return cur;
-  const boxWidth = Math.max(80, parseFloat(t.width || 0) || 200);
-  const boxHeight = Math.max(40, parseFloat(t.height || 0) || 60);
+  // EN parity with the exporter (floor=start_size): Latin-only text is
+  // NEVER shrunk — the site proves it fits at site size.
+  if (!hasArabicChars(text)) return cur;
+  const boxWidth = Math.max(20, parseFloat(t.width || 0) || 200);
+  const boxHeight = Math.max(10, parseFloat(t.height || 0) || 60);
   const lineHeight = parseFloat(t.style?.line_height || t.line_height || 1.1) || 1.1;
   const font = t.style?.font || 'Hayah';
   const fontFamily = displayFontFor(text, font);
   // Exporter-parity budgets: usable area = box minus adaptive padding.
   const [padX, padY] = fitPadding(boxWidth, boxHeight);
   const fitHeight = Math.max(1, boxHeight - padY * 2);
-  const fitWidth = Math.max(1, boxWidth - padX * 2);
+  const strokeReserve = effectiveStrokeReserve(t);
+  const fitWidth = Math.max(1, boxWidth - padX * 2 - strokeReserve * 2);
   const det = estimateSmartSize(text, boxWidth, boxHeight, lineHeight);
   const area = areaGuessSize(text, boxWidth, boxHeight);
 
   const fits = (size) => {
-    const metrics = measureTextFit(text, fontFamily, size, lineHeight, boxWidth, boxHeight);
+    const metrics = measureTextFit(text, fontFamily, size, lineHeight, boxWidth, boxHeight, strokeReserve, 2);
     return metrics.height <= fitHeight && metrics.width <= fitWidth;
   };
 
@@ -423,14 +453,14 @@ function computeSmartFontSize(t, allowGrow = false) {
       size = up;
     }
   }
-  while (size > 8 && !fits(size)) size--;
+  while (size > ARABIC_MIN_FONT && !fits(size)) size--;
   // DOM deemed untrustworthy here (everything failed): trust the rigorous
   // box-derived estimate, NOT the fill guess — a proven-overflow size is
   // never an acceptable return.
-  if (size <= 8 && Math.max(det, area) >= 14) return Math.max(8, det);
+  if (size <= ARABIC_MIN_FONT && Math.max(det, area) >= ARABIC_MIN_FONT) return Math.max(ARABIC_MIN_FONT, det);
   // NOTE: no forced boost here. The +25% boost lives ONLY in the server
   // smart-fit (endpoint/worker), so opening a chapter never compounds sizes.
-  return Math.max(8, size);
+  return Math.max(ARABIC_MIN_FONT, size);
 }
 
 // Auto-fit every rendered overlay after load/translation: box-aware fill.
@@ -2015,6 +2045,118 @@ async function startBatchScrape() {
 function batchJobId(j, idx) {
   return j.job_id ?? j.id ?? j.task_id ?? String(idx);
 }
+async function cancelScrapeTask(taskId) {
+  try {
+    const res = await fetch(`/api/scrape/cancel/${encodeURIComponent(taskId)}`, { method: 'POST' });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200) || 'فشل الإلغاء');
+    toast('أُرسل طلب الإلغاء', 'success');
+  } catch (e) {
+    toast('خطأ في الإلغاء: ' + e.message, 'error');
+  }
+  refreshTasksDrawer();
+}
+async function resumeBatchJob(jobId) {
+  try {
+    const res = await fetch(`/api/queue/resume/${encodeURIComponent(jobId)}`, { method: 'POST' });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200) || 'فشل الاستئناف');
+    toast('استُؤنفت المهمة', 'success');
+  } catch (e) {
+    toast('خطأ في الاستئناف: ' + e.message, 'error');
+  }
+  refreshTasksDrawer();
+}
+function toggleTasksDrawer() {
+  document.getElementById('tasks-drawer').classList.toggle('hidden');
+  refreshTasksDrawer();
+}
+async function pollScrapeTask(taskId) {
+  // Re-attach to a running single scrape (modal was closed / page reloaded).
+  const myGen = ++batchPollGen;
+  showScrapeModal();
+  const status = document.getElementById('scrape-status');
+  status.classList.remove('hidden');
+  while (true) {
+    await new Promise(r => setTimeout(r, 1500));
+    if (myGen !== batchPollGen) break;
+    let task;
+    try {
+      const res = await fetch(`/api/scrape/task/${taskId}`);
+      if (!res.ok) break;
+      task = await res.json();
+    } catch (e) { continue; }
+    if (task.log) status.textContent = task.log;
+    if (task.done) {
+      status.textContent += task.status === 'ok' ? '\n✓ تم التحميل بنجاح!' : `\n✗ انتهى: ${task.status} ${task.error || ''}`;
+      await loadChapterList();
+      if (task.status === 'ok' && task.slug && task.chapter) await loadChapter(task.slug, task.chapter);
+      break;
+    }
+  }
+  refreshTasksDrawer();
+}
+function reattachBatch(batchId) {
+  showScrapeModal();
+  pollBatchStatus(batchId);
+}
+const TASK_ACTIVE_Q = new Set(['queued', 'paused', 'scraping', 'translating']);
+async function refreshTasksDrawer() {
+  const badge = document.getElementById('tasks-badge');
+  const count = document.getElementById('tasks-badge-count');
+  const box = document.getElementById('tasks-drawer-items');
+  if (!badge || !box) return;
+  let rows = [];
+  try {
+    const [qres, sres] = await Promise.all([
+      fetch('/api/queue').then(r => r.ok ? r.json() : { jobs: [] }).catch(() => ({ jobs: [] })),
+      fetch('/api/scrape/tasks').then(r => r.ok ? r.json() : { tasks: [] }).catch(() => ({ tasks: [] })),
+    ]);
+    for (const j of (qres.jobs || [])) {
+      if (!TASK_ACTIVE_Q.has(j.status)) continue;
+      const jid = j.job_id || j.id;
+      const label = `دفعة: ${(j.slug || '')}/${(j.chapter ?? '')} — ${j.status} ${j.progress || 0}%`.trim();
+      const resume = j.status === 'paused'
+        ? ` <button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="resumeBatchJob('${escJs(jid)}')">استئناف</button>` : '';
+      const view = j.batch_id
+        ? `<button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="reattachBatch('${escJs(j.batch_id)}')">عرض</button>` : '';
+      rows.push(`<div class="tasks-drawer-row"><span class="t-label" title="${escHtml(label)}">${escHtml(label)}</span>`
+        + `<span style="white-space:nowrap;">${resume}<button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="cancelBatchJob('${escJs(jid)}','${escJs(j.batch_id || '')}')">إلغاء</button>`
+        + `${view}</span></div>`);
+    }
+    for (const t of (sres.tasks || [])) {
+      if (t.done) continue;
+      const label = `تحميل: ${(t.url || '').slice(0, 60)} — ${t.status}`;
+      rows.push(`<div class="tasks-drawer-row"><span class="t-label" title="${escHtml(t.url || '')}">${escHtml(label)}</span>`
+        + `<span style="white-space:nowrap;"><button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="cancelScrapeTask('${escJs(t.id)}')">إلغاء</button>`
+        + `<button class="action-btn" style="padding:2px 8px;font-size:11px;" onclick="pollScrapeTask('${escJs(t.id)}')">عرض</button></span></div>`);
+    }
+  } catch (e) { /* drawer is best-effort; badge keeps last state */ }
+  if (rows.length) {
+    badge.classList.remove('hidden');
+    count.textContent = rows.length;
+    box.innerHTML = rows.join('');
+  } else {
+    badge.classList.add('hidden');
+    box.innerHTML = '<div style="font-size:12px;opacity:.7;">لا مهام جارية — كل شيء هادئ.</div>';
+  }
+}
+setInterval(() => {
+  // Lightweight badge upkeep (2 small GETs every 8s); full render when open.
+  const drawer = document.getElementById('tasks-drawer');
+  if (drawer && !drawer.classList.contains('hidden')) refreshTasksDrawer();
+  else {
+    fetch('/api/queue').then(r => r.ok ? r.json() : null).then(q => {
+      const n = q ? (q.jobs || []).filter(j => TASK_ACTIVE_Q.has(j.status)).length : 0;
+      fetch('/api/scrape/tasks').then(r => r.ok ? r.json() : null).then(s => {
+        const m = s ? (s.tasks || []).filter(t => !t.done).length : 0;
+        const badge = document.getElementById('tasks-badge');
+        if (badge) {
+          if (n + m > 0) { badge.classList.remove('hidden'); document.getElementById('tasks-badge-count').textContent = n + m; }
+          else badge.classList.add('hidden');
+        }
+      }).catch(() => {});
+    }).catch(() => {});
+  }
+}, 8000);
 async function cancelBatchJob(jobId, batchId) {
   try {
     const res = await fetch(`/api/queue/cancel/${encodeURIComponent(jobId)}`, { method: 'POST' });
