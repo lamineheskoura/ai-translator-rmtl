@@ -1401,7 +1401,8 @@ def _batch_worker():
                             batch_jobs[job_id]["log"] = (
                                 batch_jobs[job_id].get("log") or "") + (
                                 f"✓ ضبط ذكي (صناديق {fit_stats.get('grown', 0)}، "
-                                f"خط {fit_stats.get('shrunk', 0)})\n")
+                                f"خط {fit_stats.get('shrunk', 0)}، "
+                                f"تعزيز {fit_stats.get('boosted', 0)})\n")
                     except Exception as e:
                         print(f"   [!] auto smart-fit skipped: {e}")
                     with batch_lock:

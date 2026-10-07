@@ -487,7 +487,7 @@ async function smartFitTexts(scope = 'all') {
     chapterData = await res2.json();
     await rerenderCurrentView();
     autoFittedKey = `${currentSlug}::${currentChapter}`;
-    toast(`ضبط ذكي: صناديق ${data.grown || 0}، خط ${data.shrunk || 0} (بقي ${data.kept || 0})`, 'success');
+    toast(`ضبط ذكي: صناديق ${data.grown || 0}، خط ${data.shrunk || 0}، تعزيز ${data.boosted || 0} (بقي ${data.kept || 0})`, 'success');
   } catch (e) {
     toast('فشل الضبط الذكي: ' + e.message, 'error');
   }

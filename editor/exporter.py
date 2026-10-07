@@ -268,7 +268,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
     Then fit the font (recorded into style) — shrink only as last resort.
     Mutates chapter_data in place. Returns counts dict.
     """
-    grown = shrunk = kept = skipped = 0
+    grown = shrunk = kept = skipped = boosted = 0
     work = Image.new("RGB", (8, 8), (255, 255, 255))
     draw = ImageDraw.Draw(work)
     for page in chapter_data.get("pages", []):
@@ -313,13 +313,15 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             fitted, _, _, _, _, _, _ = measure_fitted(
                 draw, arabic, font_path, start_size, max_w, max_h, lh, line_gap)
             if fitted >= start_size:
-                final = start_size
-                if start_size > site_size:
-                    final = boost_fitted(draw, arabic, font_path, start_size,
-                                         max_w, max_h, lh, line_gap)
-                    style["font_size"] = int(final)
-                    t["font_size_px"] = float(final)
-                    t["style"] = style
+                # Fits (at site size or area size) -> apply the forced +25%
+                # on the fitted number itself, ALWAYS (even at site size).
+                final = boost_fitted(draw, arabic, font_path, start_size,
+                                     max_w, max_h, lh, line_gap)
+                if final > start_size:
+                    boosted += 1
+                style["font_size"] = int(final)
+                t["font_size_px"] = float(final)
+                t["style"] = style
                 kept += 1
                 continue
             # Grow the box downward before touching the font size.
@@ -347,12 +349,16 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 shrunk += 1
             else:
                 kept += 1
+            pre = fitted
             final = boost_fitted(draw, arabic, font_path, fitted,
                                  max_w, max_h, lh, line_gap)
+            if final > pre:
+                boosted += 1
             style["font_size"] = int(final)
             t["font_size_px"] = float(final)
             t["style"] = style
-    return {"grown": grown, "shrunk": shrunk, "kept": kept, "skipped": skipped}
+    return {"grown": grown, "shrunk": shrunk, "kept": kept,
+            "skipped": skipped, "boosted": boosted}
 
 
 
