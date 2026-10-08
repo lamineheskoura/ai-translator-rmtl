@@ -45,7 +45,41 @@
     </div>
   </header>
 
-  <!-- ===== BACKGROUND TASKS MODAL (centered, same system as all modals) ===== -->
+  <!-- ===== MANAGE DOWNLOADS MODAL (ui-ux-pro-max: explicit multi-select + confirm) ===== -->
+  <div id="manage-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="manage-modal-title">
+    <div class="modal-backdrop" onclick="hideManageModal()"></div>
+    <div class="modal-content" style="max-width:560px">
+      <div class="modal-header">
+        <h2 id="manage-modal-title">إدارة المانهوات المحملة</h2>
+        <button class="modal-close" aria-label="إغلاق" onclick="hideManageModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <label class="manage-select-all"><input type="checkbox" id="manage-select-all" onchange="toggleManageSelectAll(this.checked)"> تحديد الكل (<span id="manage-count">0</span>)</label>
+        <div id="manage-list" class="tasks-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn action-btn-danger" id="manage-delete-btn" onclick="askDeleteManaged()" disabled>حذف المحدد</button>
+        <button class="action-btn" onclick="hideManageModal()">إغلاق</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== GENERIC CONFIRM MODAL (destructive actions: danger right, safe default) ===== -->
+  <div id="confirm-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+    <div class="modal-backdrop" onclick="closeConfirm(false)"></div>
+    <div class="modal-content" style="max-width:440px">
+      <div class="modal-header">
+        <h2 id="confirm-modal-title">تأكيد</h2>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-modal-message" style="font-size:14px;line-height:1.9;"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn action-btn-danger" id="confirm-modal-yes" onclick="closeConfirm(true)">تأكيد الحذف</button>
+        <button class="action-btn" id="confirm-modal-no" onclick="closeConfirm(false)">تراجع</button>
+      </div>
+    </div>
+  </div>
   <div id="tasks-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tasks-modal-title">
     <div class="modal-backdrop" onclick="hideTasksModal()"></div>
     <div class="modal-content" style="max-width:560px">
@@ -345,7 +379,10 @@
       <button class="modal-close" aria-label="إغلاق" onclick="hideChapterSelector()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
     </div>
     <div class="modal-body">
-      <input type="text" id="chapter-search" placeholder="بحث: اسم المانهوا أو رقم الفصل..." oninput="renderChapterList(this.value)" style="width:100%; height:34px; padding:0 12px; margin-bottom:10px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px;">
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <input type="text" id="chapter-search" placeholder="بحث: اسم المانهوا أو رقم الفصل..." oninput="renderChapterList(this.value)" style="flex:1; height:34px; padding:0 12px; background:var(--bg-input); border:1px solid var(--border); color:var(--text); border-radius:var(--radius); font-size:12px;">
+        <button class="action-btn" onclick="showManageModal()" title="إدارة المانهوات المحملة (تحديد وحذف)">إدارة التحميلات</button>
+      </div>
       <div id="chapter-list" class="chapter-list">
         <div class="loading-chapters">جاري تحميل الفصول...</div>
       </div>

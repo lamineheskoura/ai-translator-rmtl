@@ -691,6 +691,106 @@ async function deleteChapter(slug, chapter, event) {
   }
 }
 
+// ─── GENERIC CONFIRM (destructive actions; safe option focused) ───
+let confirmResolver = null;
+function showConfirm({ title, message, confirmLabel }) {
+  document.getElementById('confirm-modal-title').textContent = title || 'تأكيد';
+  document.getElementById('confirm-modal-message').textContent = message || '';
+  document.getElementById('confirm-modal-yes').textContent = confirmLabel || 'تأكيد';
+  document.getElementById('confirm-modal').classList.remove('hidden');
+  // Safe default gets focus: Enter = retreat, deliberate click = destroy.
+  setTimeout(() => document.getElementById('confirm-modal-no').focus(), 50);
+  return new Promise((res) => { confirmResolver = res; });
+}
+function closeConfirm(ok) {
+  document.getElementById('confirm-modal').classList.add('hidden');
+  if (confirmResolver) { confirmResolver(!!ok); confirmResolver = null; }
+}
+
+// ─── MANAGE DOWNLOADS (downloaded series, NOT published exports) ───
+let manageSelection = new Set();
+function managedSeries() {
+  const bySlug = {};
+  for (const ch of (cachedChapters || [])) {
+    const s = bySlug[ch.slug] || (bySlug[ch.slug] = { slug: ch.slug, title: ch.title || ch.slug, chapters: [], pages: 0, translated: 0 });
+    s.chapters.push(ch.chapter);
+    s.pages += ch.total_pages || 0;
+    s.translated += ch.translated_texts || 0;
+  }
+  return Object.values(bySlug).sort((a, b) => String(a.title).localeCompare(String(b.title), 'ar'));
+}
+function showManageModal() {
+  manageSelection = new Set();
+  renderManageList();
+  document.getElementById('manage-modal').classList.remove('hidden');
+}
+function hideManageModal() {
+  document.getElementById('manage-modal').classList.add('hidden');
+}
+function renderManageList() {
+  const box = document.getElementById('manage-list');
+  const series = managedSeries();
+  // Drop selections for series that vanished (deleted elsewhere).
+  for (const s of [...manageSelection]) {
+    if (!series.some(x => x.slug === s)) manageSelection.delete(s);
+  }
+  document.getElementById('manage-count').textContent = `${manageSelection.size}/${series.length}`;
+  const all = document.getElementById('manage-select-all');
+  all.checked = series.length > 0 && manageSelection.size === series.length;
+  all.indeterminate = manageSelection.size > 0 && manageSelection.size < series.length;
+  const delBtn = document.getElementById('manage-delete-btn');
+  delBtn.disabled = manageSelection.size === 0;
+  delBtn.textContent = manageSelection.size ? `حذف المحدد (${manageSelection.size})` : 'حذف المحدد';
+  if (!series.length) {
+    box.innerHTML = '<div class="task-empty">لا توجد مانهوات محملة بعد.</div>';
+    return;
+  }
+  box.innerHTML = series.map(s => {
+    const on = manageSelection.has(s.slug);
+    const sub = `${s.chapters.length} فصل • ${s.pages} صفحة • ${s.translated} نصاً مترجماً`;
+    return `<div class="task-card"><div class="manage-row">`
+      + `<input type="checkbox" class="manage-check" ${on ? 'checked' : ''} onchange="toggleManageSlug('${escJs(s.slug)}', this.checked)" aria-label="تحديد ${escHtml(s.title)}">`
+      + `<span class="task-title" title="${escHtml(s.slug)}">${escHtml(s.title)}<div class="task-sub">${escHtml(sub)}</div></span></div></div>`;
+  }).join('');
+}
+function toggleManageSlug(slug, on) {
+  if (on) manageSelection.add(slug);
+  else manageSelection.delete(slug);
+  renderManageList();
+}
+function toggleManageSelectAll(on) {
+  manageSelection = new Set();
+  if (on) for (const s of managedSeries()) manageSelection.add(s.slug);
+  renderManageList();
+}
+async function askDeleteManaged() {
+  if (!manageSelection.size) return;
+  const series = managedSeries().filter(s => manageSelection.has(s.slug));
+  const nCh = series.reduce((a, s) => a + s.chapters.length, 0);
+  const names = series.slice(0, 5).map(s => s.title).join('، ')
+    + (series.length > 5 ? `… (+${series.length - 5})` : '');
+  const ok = await showConfirm({
+    title: 'هل أنت متأكد من الحذف؟',
+    message: `سيتم حذف ${series.length} مانهوا (${nCh} فصلاً): ${names}. الفصول المحملة فقط — الصادرات المنشورة لا تُمس. تنتقل لسلة المهملات ويمكن استرجاعها.`,
+    confirmLabel: `تأكيد حذف ${series.length}`,
+  });
+  if (ok) await doDeleteManaged(series.map(s => s.slug));
+}
+async function doDeleteManaged(slugs) {
+  let done = 0, fail = 0;
+  for (const slug of slugs) {
+    try {
+      const res = await fetch(`/api/series/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      manageSelection.delete(slug);
+      done++;
+    } catch (e) { fail++; }
+  }
+  toast(fail ? `حُذف ${done} — فشل ${fail}` : `تم حذف ${done} مانهوا`, fail ? 'warning' : 'success');
+  await loadChapterList();
+  renderManageList();
+}
+
 async function deleteSeries(slug, event) {
   if (event) event.stopPropagation();
   if (!confirm(`هل أنت متأكد من حذف السلسلة "${slug}" كاملة بكل فصولها؟ (تنتقل لسلة المهملات)`)) return;
