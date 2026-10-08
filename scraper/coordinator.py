@@ -367,6 +367,12 @@ def assign_texts_to_images(
     except Exception:
         x_scale, x_offset = scale, 0.0
 
+    # UNIFORM vertical scale: y/h/font use the median width-derived x_scale,
+    # NOT the Theil-Sen sv. sv absorbs inter-image gaps (biased), while
+    # x_scale is gap-free and stable; mixing them stretched boxes vertically
+    # on mixed-width chapters. On uniform chapters they agree to ~0.04%.
+    y_scale = x_scale
+
     try:
         import statistics as _st_ymap
         _med_nat_ymap = _st_ymap.median([w for w, _ in (png_dims or []) if w and w > 0])
@@ -380,10 +386,10 @@ def assign_texts_to_images(
                           + [float(_m_tops[-1]) + float(_m_heights[-1])])
     else:
         css_cumulative = [0.0]
-    # REVERTED (regression): per-page s_xi pitch/Y moved ALL texts on real
-    # chapters. The live-verified sv model (H0=275, dx=0.0, Y ±2.3px) stays
-    # the truth until real-chapter numbers prove otherwise. We only LOG the
-    # width-derived scale beside sv now, to diagnose drift with data.
+    # UNIFORM SCALE MODEL (live-verified): pitch and all Y lengths use the
+    # median width-derived scale (gap-free, stable across pages). The
+    # Theil-Sen sv is kept ONLY for H0 estimation structure; per-page scales
+    # caused jumps on mixed-width chapters and are never used.
     try:
         _uniq_ws = [w for w, _ in (png_dims or []) if w and w > 0]
         import statistics as _st2
@@ -398,7 +404,7 @@ def assign_texts_to_images(
                 css_cumulative.append(css_cumulative[-1] + css_img_heights[i])
             else:
                 css_cumulative.append(
-                    css_cumulative[-1] + png_dims[i][1] / scale + gap)
+                    css_cumulative[-1] + png_dims[i][1] / y_scale + gap)
 
     # Containment verification (LOG ONLY, never remap/drop): count overlays
     # whose css_top falls outside their id-page span [start, end].
@@ -477,20 +483,19 @@ def assign_texts_to_images(
                 pin_bot[page_idx] = pin_bot.get(page_idx, 0) + 1
             rel_css_top = min(max(rel_css_top, 0.0), max_rel)
 
-            # Box width = style max-width (canonical block geometry, as the
-            # site authors it; live deviations are prior drag-edits, not
-            # to be cloned). Center/top are exact; Arabic is re-fitted
-            # at render time by the exporter anyway.
+            # Box width = data-box-width (the site's TRUE scaled width;
+            # style max-width is 1.4x inflated — verified live). Center/top
+            # exact; Arabic is re-fitted at render time anyway.
             fit_css_w = float(ov.get("css_width", 0) or 0)
             css_left_fit = float(ov["css_left_center"]) - fit_css_w / 2.0
 
             x_px = round(max(0.0, css_left_fit - x_offset) * x_scale, 2)
-            y_px = round(rel_css_top * scale, 2)
+            y_px = round(rel_css_top * y_scale, 2)
             x_center_px = round(
                 max(0.0, ov["css_left_center"] - x_offset) * x_scale, 2)
             width_px = round(fit_css_w * x_scale, 2)
-            height_px = round(ov["css_height"] * scale, 2)
-            font_px = round(ov["css_font_size"] * scale, 2)
+            height_px = round(ov["css_height"] * y_scale, 2)
+            font_px = round(ov["css_font_size"] * y_scale, 2)
 
             x_px = max(0.0, x_px)
             if trust_page_id and x_px + width_px > page_width:
@@ -507,7 +512,7 @@ def assign_texts_to_images(
             # Site typography (passed through; server merges it over defaults):
             # exact text color (black/white/...) + outline from text-shadow.
             site_font = max(6.0, font_px)
-            site_stroke_w = round((ov.get("css_stroke_width") or 0) * scale, 2)
+            site_stroke_w = round((ov.get("css_stroke_width") or 0) * y_scale, 2)
             site_style = {
                 "font": "Hayah",
                 "font_size": int(round(site_font)),

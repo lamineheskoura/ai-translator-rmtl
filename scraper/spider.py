@@ -185,9 +185,10 @@ def extract_overlays(page, num_images: int = 0,
             if not text:
                 continue
             left_raw = parse_style_px(style, "left")
-            w = parse_style_px(style, "max-width")
-            if w == 0:
-                w = parse_float(attrib.get("data-box-width"))
+            _w0 = parse_style_px(style, "max-width")
+            _wdb = parse_float(attrib.get("data-box-width"))
+            # Same true-width rule as pass 2 (max-width is 1.4x inflated).
+            w = _wdb if _wdb > 0 else (_w0 / 1.4 if _w0 > 0 else 0)
             if left_raw > 0 and w > 0:
                 raw_items.append((left_raw, w))
         except Exception:
@@ -265,8 +266,14 @@ def extract_overlays(page, num_images: int = 0,
             css_height = parse_style_px(style, "height")
             css_fontsize = parse_style_px(style, "font-size")
 
-            if css_width == 0:
-                css_width = parse_float(attrib.get("data-box-width"))
+            # TRUE width first: data-box-width is the site's real scaled width.
+            # style max-width is EXACTLY 1.4x inflated on every overlay
+            # (verified live) — using it made all boxes 40% too wide.
+            _dbw = parse_float(attrib.get("data-box-width"))
+            if _dbw > 0:
+                css_width = _dbw
+            elif css_width > 0:
+                css_width = css_width / 1.4
             if css_height == 0:
                 css_height = parse_float(attrib.get("data-box-height"))
             if css_fontsize == 0:

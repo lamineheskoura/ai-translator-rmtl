@@ -89,12 +89,14 @@ def parse_chapter_full(driver, page_settle_time: float = 3.5):
 
             left_center_raw = parse_style_px(style, "left")
             top_global = parse_style_px(style, "top")
-            css_width = parse_style_px(style, "max-width")
+            # TRUE width first: data-box-width is real; style max-width is
+            # 1.4x inflated (verified live on every overlay).
+            _dbw = parse_float(el.get_attribute("data-box-width"))
+            _mw = parse_style_px(style, "max-width")
+            css_width = _dbw if _dbw > 0 else (_mw / 1.4 if _mw > 0 else 0)
             css_height = parse_style_px(style, "height")
             css_fontsize = parse_style_px(style, "font-size")
 
-            if css_width == 0:
-                css_width = parse_float(el.get_attribute("data-box-width"))
             if css_height == 0:
                 css_height = parse_float(el.get_attribute("data-box-height"))
 

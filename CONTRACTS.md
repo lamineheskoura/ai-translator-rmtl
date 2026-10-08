@@ -71,6 +71,11 @@
   chapters — the live-verified sv model stays truth. Scrape logs
   `sv vs width-derived` each run; drift gets fixed with real numbers only.
   Worker fit == manual fit: same function, same export prefs, normalize+backup first.
+- SITE-EXACT geometry (verified on live HTML): box width = `data-box-width`
+  (style `max-width` is exactly 1.4x inflated — verified on 8/8 overlays).
+  Y/pitch/height/font use the UNIFORM median width scale (gap-free, stable);
+  sv lives only inside H0 estimation. Overlay px basis = 970 container,
+  images `no-gaps` stacked, displayed = min(natural, 940).
 
 ## 8) عقد المهام (الخلفية مرئية دائماً)
 - مهام الطابور بعد إعادة التشغيل تبدأ **PAUSED** (لا تشغيل ذاتي أبداً)؛
