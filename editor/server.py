@@ -1113,6 +1113,97 @@ def refetch_texts(slug: str, chapter: str):
             "kept_translations": len(saved)}
 
 
+@app.post("/api/chapter/{slug}/{chapter}/repair-geometry")
+def repair_geometry(slug: str, chapter: str):
+    """Re-apply FRESH site coordinates to existing boxes (by bubble id).
+
+    Fetches overlay tops only (no image download — page PNGs on disk are
+    reused for dimensions). Stored translations, styles, fonts, review
+    flags are NEVER touched; only x/y/width/height move to site truth.
+    Boxes the site removed are kept (user work is never deleted); boxes
+    the site added are appended untranslated. .bak first, counts returned.
+    """
+    from scraper.spider import fetch_chapter_page
+    from scraper.coordinator import assign_texts_to_images
+    from PIL import Image as _PILImage
+    ch_dir = _chapter_dir(slug, chapter)
+    json_path = ch_dir / "chapter_data.json"
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter not found: {ch_dir}")
+    with open(json_path, "r", encoding="utf-8") as f:
+        old = json.load(f)
+    url = (old.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "No source URL stored for this chapter")
+    pages_dir = ch_dir / "pages"
+    png_files = sorted(pages_dir.glob("page_*.png")) if pages_dir.exists() else []
+    if not png_files:
+        raise HTTPException(400, "No page images on disk — re-scrape fully instead")
+    try:
+        png_dims = []
+        for pf in png_files:
+            with _PILImage.open(pf) as im:
+                png_dims.append((im.width, im.height))
+    except Exception as e:
+        raise HTTPException(500, f"Cannot read page images: {e}")
+    res = fetch_chapter_page(url)
+    if not res:
+        raise HTTPException(502, "فشل جلب الموقع (إنترنت بطيء؟ أعد المحاولة)")
+    image_urls, page_texts, rendered_w, css_heights, title, geo_tops = res[:6]
+    try:
+        fresh_pages = assign_texts_to_images(
+            page_texts, png_dims, 1.0, [], trust_page_id=True,
+            geo_tops=geo_tops)
+    except Exception as e:
+        raise HTTPException(500, f"Geometry mapping failed: {e}")
+    fresh_by_id = {t.get("id"): (pg.get("page"), t)
+                   for pg in fresh_pages for t in pg.get("texts", [])
+                   if t.get("id")}
+    _backup_json(json_path)
+    updated = added = 0
+    with _file_transaction(json_path) as data:
+        have_ids = set()
+        for page in data.get("pages", []):
+            for t in page.get("texts", []) or []:
+                tid = t.get("id", "")
+                if not tid:
+                    continue
+                have_ids.add(tid)
+                f = fresh_by_id.get(tid)
+                if not f:
+                    continue
+                _, ft = f
+                try:
+                    t["x"] = round(float(ft.get("x", t.get("x", 0))), 2)
+                    t["y"] = round(float(ft.get("y", t.get("y", 0))), 2)
+                    t["width"] = round(max(20.0, float(ft.get("width", 200))), 2)
+                    t["height"] = round(max(10.0, float(ft.get("height", 60))), 2)
+                    # Never-fitted texts also take the site font size;
+                    # fitted ones keep the user's reviewed size.
+                    st = t.get("style") or {}
+                    if not st.get("_fit_final"):
+                        t["font_size_px"] = float(ft.get("font_size_px",
+                                                         t.get("font_size_px", 45)))
+                    updated += 1
+                except Exception:
+                    continue
+        # Append site-added boxes (untranslated, site geometry as-is).
+        new_ids = [tid for tid in fresh_by_id if tid not in have_ids]
+        if new_ids:
+            by_page: dict = {}
+            for tid in new_ids:
+                pgnum, ft = fresh_by_id[tid]
+                by_page.setdefault(pgnum, []).append(ft)
+            id_pages = {p.get("page"): p for p in data.get("pages", [])}
+            for pgnum in sorted(by_page):
+                if pgnum in id_pages:
+                    id_pages[pgnum].setdefault("texts", []).extend(by_page[pgnum])
+                    added += len(by_page[pgnum])
+    return {"status": "ok", "slug": slug, "chapter": chapter,
+            "updated": updated, "added": added,
+            "note": "translations/styles/fonts untouched — run smart-fit once after"}
+
+
 @app.post("/api/chapter/{slug}/{chapter}/reset")
 def reset_chapter(slug: str, chapter: str):
     """Reset all arabic_text fields to empty string."""

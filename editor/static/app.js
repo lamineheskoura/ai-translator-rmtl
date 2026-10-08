@@ -2526,6 +2526,33 @@ async function translateMissingOnce() {
   return data;
 }
 
+async function repairGeometry() {
+  // Site truth applied to boxes: fresh overlay tops, no image download.
+  // Translations/styles/fonts/review flags untouched. Run ONE smart-fit after.
+  if (!chapterData) { toast('افتح فصلاً أولاً', 'warning'); return; }
+  if (!confirm('إصلاح إحداثيات الصناديق من الموقع؟ (الترجمة والخطوط والمراجعة محفوظة — تتغير x/y فقط)')) return;
+  pushUndo(); // geometry replacement is undoable
+  toast('جاري جلب إحداثيات الموقع... (بلا تحميل صور)', 'info', 90000);
+  try {
+    const res = await fetch(
+      `/api/chapter/${currentSlug}/${currentChapter}/repair-geometry`,
+      { method: 'POST' }
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'فشل الإصلاح');
+    toast(`تم: حُدّث ${data.updated} صندوقاً، أُضيف ${data.added} — نفّذ ضبطاً ذكياً واحداً بعده`, 'success');
+    const res2 = await fetch(`/api/chapter/${currentSlug}/${currentChapter}`);
+    if (!res2.ok) throw new Error('HTTP ' + res2.status);
+    const fresh = await res2.json();
+    if (!fresh || !Array.isArray(fresh.pages)) throw new Error('bad chapter payload');
+    chapterData = fresh;
+    // One server fit on the fresh geometry (grow + boost), then done.
+    await smartFitTexts();
+  } catch (e) {
+    toast('خطأ في إصلاح الهندسة: ' + e.message, 'error');
+  }
+}
+
 async function refetchTexts() {
   // Slow-network saver: re-fetch overlay texts+geometry only.
   // Images come from local cache; translations/styles are restored by id.
