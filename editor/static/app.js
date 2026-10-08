@@ -913,7 +913,7 @@ async function renderWebtoon() {
 
       stack.appendChild(block);
       pageBlocks.push(block);
-      globalY += h + 16;
+      globalY += h + 22; // must match #pages-stack gap:22px (dead code — do not trust for positioning)
     }
 
     currentPage = 1;

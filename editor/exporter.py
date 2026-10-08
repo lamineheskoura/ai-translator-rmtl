@@ -64,9 +64,9 @@ TEXT_PADDING = 6
 # appears and the shrink loop collapses sizes needlessly.
 LATIN_WIDTH_FACTOR = 0.8
 
-# Smart-fit result boost (experimental, user-tuned): fitted sizes are
-# enlarged by this factor when they still fit the box. Never shrinks.
-AUTO_FIT_BOOST = 1.25
+# Smart-fit result boost (user-tuned): fitted sizes are enlarged by
+# this factor. Never shrinks.
+AUTO_FIT_BOOST = 1.35
 
 # Global Arabic minimum: auto-fit NEVER goes below this (user rule).
 # Manual overrides still win — explicit intent beats auto.
@@ -709,10 +709,11 @@ def _render_page(background: Image.Image, texts: list[dict],
         line_height_factor = max(0.7, min(3.0, line_height_factor))
         rotation = float(t.get("style", {}).get("rotation", 0) or t.get("rotation", 0) or 0)
 
-        box_x = int(t.get("x", 0))
-        box_y = int(t.get("y", 0))
-        box_w = int(t.get("width", 200))
-        box_h = int(t.get("height", 100))
+        # round(), not int(): int() floors (biased up/left ~1px per box).
+        box_x = int(round(float(t.get("x", 0) or 0)))
+        box_y = int(round(float(t.get("y", 0) or 0)))
+        box_w = int(round(float(t.get("width", 200) or 200)))
+        box_h = int(round(float(t.get("height", 100) or 100)))
 
         if box_w < 20:
             box_w = 200
@@ -762,7 +763,19 @@ def _render_page(background: Image.Image, texts: list[dict],
         eff_stroke_w = int(round(max(eff_stroke_w, 0)))
         box_canvas = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
         box_draw = ImageDraw.Draw(box_canvas)
-        start_y = padding_y + max(0, (max_h - total_text_h) / 2)
+        # DOM-parity vertical placement: the browser centers EM line boxes
+        # (baseline-anchored, descender void kept below the baseline), NOT
+        # tight ink bboxes. Centering ink instead sat text ~0.2em too HIGH.
+        # So: CSS line box LB=size*lh stacked with gaps, block centered in
+        # max_h; each line placed by its BASELINE with half-leading split.
+        try:
+            _asc, _desc = font.getmetrics()
+        except Exception:
+            _asc, _desc = fitted_font_size, 0
+        _em_h = _asc + _desc
+        _lb = max(1.0, float(fitted_font_size) * float(line_height_factor))
+        _total_em = _lb * len(wrapped) + max(len(wrapped) - 1, 0) * line_gap
+        start_y = padding_y + max(0, (max_h - _total_em) / 2)
 
         for i, line in enumerate(wrapped):
             try:
@@ -779,15 +792,12 @@ def _render_page(background: Image.Image, texts: list[dict],
             else:
                 lx = padding_x
 
-            lh = max(line_heights[i] if i < len(line_heights) else base_line_h, 1)
-            line_box_y = start_y + (i * (base_line_h + line_gap))
-            ly = line_box_y + max(0, (base_line_h - lh) / 2)
+            slot_top = start_y + (i * (_lb + line_gap))
+            baseline = slot_top + max(0.0, (_lb - _em_h) / 2.0) + _asc
+            # Horizontal: exact ink-left (as before). Vertical: ascender-top
+            # for the default "la" anchor == baseline - ascent.
+            dx, dy = lx - tb[0], baseline - _asc
 
-            # Exact ink placement: the default "la" anchor pins the ASCENDER
-            # line at y while our slots are INK-bbox based — Arabic diacritics
-            # rise above the ascender, so text sat HIGH. Offset by the
-            # measured ink origin and the tight bbox lands exactly in slot.
-            dx, dy = lx - tb[0], ly - tb[1]
             if draw_stroke and eff_stroke_w > 0:
                 box_draw.text((dx, dy), line, font=font, fill=eff_stroke_c, stroke_width=eff_stroke_w, stroke_fill=eff_stroke_c, align="left")
             box_draw.text((dx, dy), line, font=font, fill=text_color, align="left")
