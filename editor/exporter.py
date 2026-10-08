@@ -326,12 +326,16 @@ def _grow_width(draw, text: str, font_path: str, size: int,
         vcap = h + 1.0
     vblocked = vcap <= h + 1.0
     try:
-        _, _, _, line_widths, _, _, _ = measure_fitted(
+        _, _, _, line_widths, _, _, _th = measure_fitted(
             draw, text, font_path, size, max_w, max_h, lh, line_gap,
             mstroke, size)  # pinned: measure overflow, don't shrink
     except Exception:
         return x, w, max_w, pad_x, False
     widest = max(line_widths) if line_widths else 0
+    # Idempotency first: if the size ALREADY fits, touch nothing — growth
+    # must never oscillate across repeated fits.
+    if _th <= max_h and widest + mstroke * 2 <= max_w:
+        return x, w, max_w, pad_x, False
     need_w = widest + mstroke * 2 + pad_x * 2 + 2
     if need_w <= w and not vblocked:
         return x, w, max_w, pad_x, False
@@ -518,7 +522,8 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                        key=lambda t: float(t.get("y", 0) or 0))
         # Pre-pass: input boxes may already overlap (broken scrape/drag).
         # Separate FIRST so growth caps are computed against clean gaps.
-        separated += _separate_overlaps(texts, page_h, gap=3.0)
+        # Only truly stuck boxes move (gap rule inside).
+        separated += _separate_overlaps(texts, page_h, gap=2.0)
         for idx, t in enumerate(texts):
             arabic = (t.get("arabic_text") or "").strip()
             if not arabic:
@@ -537,6 +542,21 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             except Exception:
                 skipped += 1
                 continue
+            # Hard caps (same as save-time): the box must sit INSIDE its page.
+            # Clamp width first, then shift x left (never below 4); only as
+            # a last resort shrink width. h_orig/w_orig capture clamped vals.
+            if page_w > 20:
+                _ox, _ow = x, w
+                if w > page_w - 8.0:
+                    w = page_w - 8.0
+                if x + w > page_w - 4.0:
+                    x = page_w - 4.0 - w
+                    if x < 4.0:
+                        x = 4.0
+                        w = max(20.0, page_w - 8.0)
+                if x != _ox or w != _ow:
+                    t["width"] = round(w, 2)
+                    t["x"] = round(x, 2)
             mstroke = _effective_stroke(style, force_stroke, export_stroke_width)
             h_orig = h
             w_orig = w
@@ -545,6 +565,25 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             if not font_path:
                 skipped += 1
                 continue
+            # Idempotency anchors: repeated fits must converge, never ratchet.
+            # _fit_base = pre-boost fitted size from the last fit;
+            # _fit_final = the boosted size stored then. If the current size
+            # still equals _fit_final, this is a re-fit of unchanged data:
+            # restart from _fit_base (not from the boosted size) so the
+            # x1.35 applies exactly ONCE. If the user changed the size (or
+            # the text), treat it as fresh input.
+            try:
+                _prev_base = int(style.get("_fit_base") or 0)
+            except Exception:
+                _prev_base = 0
+            try:
+                _prev_final = int(style.get("_fit_final") or 0)
+            except Exception:
+                _prev_final = 0
+            if _prev_base > 0 and site_size == _prev_final:
+                anchor = _prev_base
+            else:
+                anchor = site_size
             pad_x = min(6.0, max(2.0, w * 0.02))
             pad_y = min(6.0, max(2.0, h * 0.10))
             max_w, max_h = max(1, w - pad_x * 2), max(1, h - pad_y * 2)
@@ -553,7 +592,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             nch = max(1, len(" ".join(arabic.split())))
             area_start = max(8, min(120, round(
                 0.6 * ((max(w * h, 400.0) / nch) ** 0.5))))
-            start_size = min(120, max(site_size, area_start))
+            start_size = min(120, max(anchor, area_start))
             fitted, _, _, _, _, _, _ = measure_fitted(
                 draw, arabic, font_path, start_size, max_w, max_h, lh,
                 line_gap, mstroke)
@@ -565,7 +604,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 # Then grow the box if the boost overflows (never clip).
                 final = boost_fitted(draw, arabic, font_path, start_size,
                                      max_w, max_h, lh, line_gap)
-                if final > start_size:
+                if final > site_size:
                     boosted += 1
                 # Width FIRST (unwraps lines, reduces height need), then height.
                 x, w, max_w, pad_x, wgrew = _grow_width(
@@ -590,6 +629,8 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                     t["height"] = round(h, 2)
                 style["font_size"] = int(final)
                 t["font_size_px"] = float(final)
+                style["_fit_base"] = int(start_size)
+                style["_fit_final"] = int(final)
                 t["style"] = style
                 kept += 1
                 continue
@@ -612,7 +653,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             pre = fitted
             final = boost_fitted(draw, arabic, font_path, fitted,
                                  max_w, max_h, lh, line_gap)
-            if final > pre:
+            if final > site_size:
                 boosted += 1
             # Width FIRST (unwraps lines, reduces height need), then height.
             x, w, max_w, pad_x, wgrew = _grow_width(
@@ -637,10 +678,13 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
                 t["height"] = round(h, 2)
             style["font_size"] = int(final)
             t["font_size_px"] = float(final)
+            style["_fit_base"] = int(pre)
+            style["_fit_final"] = int(final)
             t["style"] = style
-        # Post-pass: no two x-overlapping boxes may touch — guarantee a
-        # >=3px gap (survives int() truncation at render as >=1px).
-        separated += _separate_overlaps(texts, page_h, gap=3.0)
+        # Post-pass: touch NOTHING that isn't actually stuck to another box.
+        # Only x-overlapping boxes closer than gap get the minimal push down
+        # (never up). gap=2.0: with round() geometry this lands >=1px.
+        separated += _separate_overlaps(texts, page_h, gap=2.0)
     return {"grown": grown, "shrunk": shrunk, "kept": kept,
             "skipped": skipped, "boosted": boosted,
             "separated": separated}
