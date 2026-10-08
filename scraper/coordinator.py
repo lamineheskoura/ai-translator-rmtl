@@ -183,18 +183,9 @@ def estimate_vertical_geometry(page_texts: dict, png_dims: list,
         h0 = min(h0_raw, 275.0)
         print(f"   [!] H0 fallback (no corroborated flush box).")
     h0 = max(0.0, min(600.0, h0))
-    # Snap zone: H0 is live-verified at 275.0. A raw estimate within ±25
-    # of it is estimator wobble (box depths/site re-OCR shift run to run),
-    # NOT a different header — snapping kills the ±16px uniform jitter
-    # between scrapes of the same chapter. Genuinely different headers
-    # (raw far from 275) still pass through untouched.
-    try:
-        _raw_f = float(h0_raw) if h0_raw is not None else None
-    except Exception:
-        _raw_f = None
-    if _raw_f is not None and abs(_raw_f - 275.0) <= 25.0 and h0 != 275.0:
-        print(f"   [i] H0 snap: raw={_raw_f:.1f} within 25 of verified 275 -> using 275.0")
-        h0 = 275.0
+    # Snap zone REMOVED (regression): forcing raw~[250,300] to 275 added a
+    # uniform down-shift on chapters whose true header differs. The min-cap
+    # above stays (it only ever corrects upward bias, never invents depth).
     print(f"   [i] Vertical geometry: s={s:.4f} H0 raw={h0_raw:.1f} capped={h0:.1f}css "
           f"({len(pts)} overlays, {len(slopes)} pairs)")
     return s, h0
