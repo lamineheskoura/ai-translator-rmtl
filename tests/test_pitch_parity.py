@@ -99,6 +99,8 @@ def check_autofit():
     from editor.exporter import autofit_chapter_boxes
 
     data = build_synthetic_chapter()
+    y_before = {t.get("id"): float(t.get("y", 0) or 0)
+                for p in data["pages"] for t in p.get("texts", [])}
     stats = autofit_chapter_boxes(data)
     print(f"    stats={stats}")
 
@@ -117,29 +119,16 @@ def check_autofit():
             )
     print("    (a) OK: no box width exceeds its page width")
 
-    # (b) x-overlapping boxes on a page have >=1px gaps afterwards
+    # (b) NO-PUSH RULE: autofit must never move any box's y, no matter how
+    # much boxes grow or overlap. Growth is capped by neighbors, never
+    # pushed into them. Site overlaps stay exactly as authored.
     for page in data["pages"]:
-        texts = list(page.get("texts", []) or [])
-        for i in range(len(texts)):
-            for j in range(i + 1, len(texts)):
-                a, b = texts[i], texts[j]
-                ax, aw = float(a.get("x", 0) or 0), float(a.get("width", 0) or 0)
-                bx, bw = float(b.get("x", 0) or 0), float(b.get("width", 0) or 0)
-                x_overlap = (ax < bx + bw) and (bx < ax + aw)
-                if not x_overlap:
-                    continue
-                ay, ah = float(a.get("y", 0) or 0), float(a.get("height", 0) or 0)
-                by, bh = float(b.get("y", 0) or 0), float(b.get("height", 0) or 0)
-                if ay <= by:
-                    gap = by - (ay + ah)
-                else:
-                    gap = ay - (by + bh)
-                assert gap >= 1.0 - 1e-6, (
-                    f"(b) x-overlapping boxes {a.get('id')}/{b.get('id')} "
-                    f"on page {page.get('page')} gap {gap:.2f}px < 1px "
-                    f"(a y={ay} h={ah}, b y={by} h={bh})"
-                )
-    print("    (b) OK: x-overlapping boxes have >=1px gaps")
+        for t in page.get("texts", []) or []:
+            assert abs(float(t.get("y", 0) or 0) - y_before.get(t.get("id"), 0)) <= 1e-6, (
+                f"(b) box {t.get('id')} y moved by autofit "
+                f"({y_before.get(t.get('id'))} -> {t.get('y')})"
+            )
+    print("    (b) OK: no box y moved (no-push rule)")
 
     # (c) every translated text has font_size_px >= 14
     for page in data["pages"]:

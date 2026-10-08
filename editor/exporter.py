@@ -388,53 +388,6 @@ def _grow_width(draw, text: str, font_path: str, size: int,
     return x2, w2, max(1, w2 - pad_x2 * 2), pad_x2, True
 
 
-def _separate_overlaps(texts: list, page_h: float, gap: float = 3.0):
-    """Post-pass: guarantee a >=gap px vertical gap between x-overlapping
-    boxes (push DOWN only, never above original y; clamp at page bottom).
-    A single forward pass cascades correctly (uses pushed bottoms).
-    Returns count of moved boxes.
-    """
-    moved = 0
-    try:
-        max_bottom = float(page_h or 0) - 4.0
-    except Exception:
-        return 0
-    orig_y = {}
-    for t in texts:
-        try:
-            orig_y[id(t)] = float(t.get("y", 0) or 0)
-        except Exception:
-            continue
-    for i, cur in enumerate(texts):
-        try:
-            cx = float(cur.get("x", 0) or 0)
-            cy = float(cur.get("y", 0) or 0)
-            cw = max(20.0, float(cur.get("width", 200) or 200))
-            ch = max(10.0, float(cur.get("height", 60) or 60))
-        except Exception:
-            continue
-        req = cy
-        for prev in texts[:i]:
-            try:
-                px = float(prev.get("x", 0) or 0)
-                py = float(prev.get("y", 0) or 0)
-                pw = max(20.0, float(prev.get("width", 200) or 200))
-                ph = max(10.0, float(prev.get("height", 60) or 60))
-            except Exception:
-                continue
-            if px < cx + cw and cx < px + pw and py <= cy:
-                req = max(req, py + ph + gap)
-        if req > cy:
-            ny = max(orig_y.get(id(cur), cy), req)
-            if ny + ch > max_bottom:
-                ch = max(10.0, max_bottom - ny)
-            if ny + ch >= req:
-                cur["y"] = round(ny, 2)
-                cur["height"] = round(ch, 2)
-                moved += 1
-    return moved
-
-
 def _next_top(texts: list, idx: int, x: float, y: float, w: float,
               page_h: float) -> float:
     """Top of the first box below (with horizontal overlap)."""
@@ -507,7 +460,7 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
     Then fit the font (recorded into style) — shrink only as last resort.
     Mutates chapter_data in place. Returns counts dict.
     """
-    grown = shrunk = kept = skipped = boosted = separated = 0
+    grown = shrunk = kept = skipped = boosted = 0
     work = Image.new("RGB", (8, 8), (255, 255, 255))
     draw = ImageDraw.Draw(work)
     for page in chapter_data.get("pages", []):
@@ -520,10 +473,10 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             continue
         texts = sorted((page.get("texts", []) or []),
                        key=lambda t: float(t.get("y", 0) or 0))
-        # Pre-pass: input boxes may already overlap (broken scrape/drag).
-        # Separate FIRST so growth caps are computed against clean gaps.
-        # Only truly stuck boxes move (gap rule inside).
-        separated += _separate_overlaps(texts, page_h, gap=2.0)
+        # NO-PUSH RULE (user): autofit NEVER moves any box's y, no matter
+        # how much this or another box grows. Growth is only CAPPED by the
+        # next box top (respect without touching). Overlaps from the site
+        # stay exactly as the site authored them.
         for idx, t in enumerate(texts):
             arabic = (t.get("arabic_text") or "").strip()
             if not arabic:
@@ -681,13 +634,8 @@ def autofit_chapter_boxes(chapter_data: dict, max_grow: float = 2.0,
             style["_fit_base"] = int(pre)
             style["_fit_final"] = int(final)
             t["style"] = style
-        # Post-pass: touch NOTHING that isn't actually stuck to another box.
-        # Only x-overlapping boxes closer than gap get the minimal push down
-        # (never up). gap=2.0: with round() geometry this lands >=1px.
-        separated += _separate_overlaps(texts, page_h, gap=2.0)
     return {"grown": grown, "shrunk": shrunk, "kept": kept,
-            "skipped": skipped, "boosted": boosted,
-            "separated": separated}
+            "skipped": skipped, "boosted": boosted}
 
 
 
