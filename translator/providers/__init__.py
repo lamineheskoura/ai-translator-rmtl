@@ -7,29 +7,44 @@ from pathlib import Path
 from typing import Optional
 
 # Internal prompt constants (moved from translator/prompts.py so providers work standalone)
-STRICT_SYSTEM_PROMPT = """You translate manga dialogue from English to Arabic. You speak fluent Arabic and understand manga storytelling.
+STRICT_SYSTEM_PROMPT = """You translate manhwa dialogue from English to Arabic. You are a professional Arabic manga localizer.
 
 WORKFLOW (do all of this before producing output):
-1. Silently read ALL English texts below as ONE continuous passage.
-2. Identify the scene, characters, tone (comedy/battle/dramatic), dialects.
-3. For each numbered line, translate into natural, fluent Arabic that fits the surrounding context - readers should feel they are reading an Arabic manga, not a word-by-word machine translation.
-4. Use natural spoken Arabic where appropriate, not stiff literal translations.
+1. Silently read ALL lines below as ONE continuous passage. Identify the scene, the speakers, and the tone (battle/comedy/drama/romance).
+2. Track every speaker across lines: once a line reveals a speaker's gender, keep that SAME gender for that voice to the end.
+3. Translate each tagged line into Arabic that reads like a published Arabic manga — never word-by-word machine Arabic.
+
+ARABIC STYLE (strict):
+- Base register is Modern Standard Arabic. Narration and inner monologue: literary MSA. Spoken dialogue: light, natural, spoken-feeling Arabic — never stiff, never heavy dialect.
+- Natural Arabic word order. FORBIDDEN calques: overuse of أنت/هو/هي pronouns, هذا/إنها filler starts, كان + verb chains, تم + verbal-noun passives, قام بـ, over-explicit possessives.
+- Localize honorifics, never transliterate: brother/sister -> أخي/أختي, master -> معلمي/سيدي by context, lord/lady -> سيدي/سيدتي. Drop -ssi/-nim/-san.
+- Exclamations natively: تباً! اللعنة! يا للهول! مستحيل! Never transliterate English interjections.
+- SFX (*boom*, *thud*): render as Arabic onomatopoeia (دويّ! طرق! وشوشة!). Keep brackets only if the inside word is untranslatable.
+- Names: transliterate once into Arabic letters and REUSE the identical form everywhere (see KEY TERMS when provided).
+- Battle: short verbless clauses, imperatives. Romance: soft literary MSA. Comedy: punchline timing first, light colloquial flavor allowed.
+- One Arabic sentence per line; split long English lines into two natural breaths. Never explain jokes — adapt them.
+
+GENDER (you never see the images; Arabic verbs/adjectives inflect):
+- Hard cues decide: he/him/his, brother/son/king/prince/sir/Mr -> masculine; she/her, sister/daughter/queen/princess/miss/Mrs/wife -> feminine.
+- Resolve I/you from the 4 surrounding lines (who addresses whom; vocatives and answering pronouns fix the voice).
+- DEFAULT masculine singular when nothing proves feminine. NEVER guess feminine from role stereotypes.
+- When the addressee is truly unknown (a crowd, a shouted order), AVOID guessing: rephrase neutrally, e.g. "أنت غاضب" -> "لا داعي للغضب", "اذهب بسرعة" -> "يجب الذهاب بسرعة", "أحسنت، أنت شجاع" -> "عمل رائع! تصرف شجاع حقاً".
+- First gender cue for a voice FREEZES it for the whole passage. A later explicit cue (she/sister) overrides forward only; never flip back.
 
 OUTPUT FORMAT (strict):
-- One Arabic line per line, in the SAME ORDER as the input numbers.
-- No numbering, no prefix, no quotes, no JSON, no markdown.
-- No English, no Chinese, no other language anywhere.
-- Empty lines are forbidden.
-- Each line corresponds ONE-TO-ONE with the input line.
-- Only Arabic characters and punctuation are allowed in each output line.
+- Input lines look like: [abc] English text. Output the SAME tag + Arabic: [abc] Arabic text. One per line, SAME order.
+- The [tag] is the ONLY prefix allowed. No [N] numbers, no quotes, no JSON, no markdown, no preamble, no explanation.
+- NEVER reorder, merge, split, or skip lines. A line "..." outputs as "[tag] ...".
+- Never reuse names or words from the examples below unless they appear in the input.
 
-If a line is "..." output "..." (Arabic period).
-If a line is a name (e.g. "Cain"), transliterate to Arabic letters (e.g. كاين) and DO NOT leave it romanized.
-If a line is pure onomatopoeia ("*sigh*"), translate as onomatopoeia in Arabic or keep the brackets and translate the inside word.
+EXAMPLES (style only — never copy their content):
+EN: [abc] You've got some nerve showing up here. -> AR: [abc] كيف تجرؤ على المجيء إلى هنا؟
+EN: [abc] *thud* -> AR: [abc] دويّ!
+EN: [abc] Cain, behind you! -> AR: [abc] كاين، خلفك!
 
-Begin output directly on the first line. No preamble. No explanation."""
+Begin output directly on the first line."""
 
-SINGLE_SYSTEM_PROMPT = """Translate the following English sentence to Arabic. Output ONLY the Arabic translation — no English, no explanation, no quotes, no extra text."""
+SINGLE_SYSTEM_PROMPT = """Translate one English manga line to Arabic (Modern Standard Arabic, natural manga dialogue, masculine default unless the sentence itself proves feminine). Output ONLY the Arabic translation — no English, no explanation, no quotes."""
 
 _STRICT_SYSTEM = None
 _SINGLE_SYSTEM = None
@@ -255,14 +270,14 @@ def _retry_delay(err_json: dict) -> float:
     return 4.0
 
 
-def translate_via_google(texts: list[str], model: str, api_key: str, tags: list[str] | None = None) -> Optional[list[str]]:
+def translate_via_google(texts: list[str], model: str, api_key: str, tags: list[str] | None = None, pages: list | None = None, glossary: list[str] | None = None) -> tuple[Optional[list[str]], bool]:
     system, _ = _get_prompts()
-    user = _build_user_prompt(texts, tags)
+    user = _build_user_prompt(texts, tags, pages, glossary)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     payload = {
         "system_instruction": {"parts": [{"text": system}]},
         "contents": [{"parts": [{"text": user}]}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192},
     }
     ok, err, body = _post_json(
         url,
@@ -280,9 +295,9 @@ def translate_via_google(texts: list[str], model: str, api_key: str, tags: list[
     return _parse_output(raw, len(texts), tags)
 
 
-def translate_via_openai(texts: list[str], model: str, api_key: str, base_url: str, tags: list[str] | None = None) -> Optional[list[str]]:
+def translate_via_openai(texts: list[str], model: str, api_key: str, base_url: str, tags: list[str] | None = None, pages: list | None = None, glossary: list[str] | None = None) -> tuple[Optional[list[str]], bool]:
     system, _ = _get_prompts()
-    user = _build_user_prompt(texts, tags)
+    user = _build_user_prompt(texts, tags, pages, glossary)
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": model,
@@ -290,7 +305,7 @@ def translate_via_openai(texts: list[str], model: str, api_key: str, base_url: s
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.3,
+        "temperature": 0.2,
         "max_tokens": 8192,
     }
     headers = {"Content-Type": "application/json"}
@@ -305,6 +320,37 @@ def translate_via_openai(texts: list[str], model: str, api_key: str, base_url: s
         return None
     raw = choices[0].get("message", {}).get("content", "")
     return _parse_output(raw, len(texts), tags)
+
+
+def _extract_batch_glossary(original_texts: list[str], limit: int = 15) -> list[str]:
+    """Candidate key terms (names/guilds/skills) for consistency injection.
+
+    Proper-noun-ish tokens (Capitalized, len>=3) by frequency. No persistence
+    here — the instruction forces ONE Arabic form per request; the server may
+    additionally pass a series glossary via glossary_extra (future hook).
+    """
+    import re
+    from collections import Counter
+    stop = {"The", "This", "That", "These", "Those", "What", "When", "Where",
+            "Why", "How", "You", "Your", "His", "Her", "Its", "Our", "Their",
+            "And", "But", "For", "With", "From", "Into", "Not", "Are", "Was",
+            "Were", "Have", "Has", "Had", "Will", "Would", "Should", "Could",
+            "There", "Here", "Then", "Now", "Yes", "No", "Hey", "Well", "Oh"}
+    counts: Counter = Counter()
+    for t in original_texts or []:
+        for tok in re.findall(r"[A-Z][a-zA-Z'\-]{2,}", t or ""):
+            if tok not in stop:
+                counts[tok] += 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [w for w, c in ranked[:limit] if c >= 2 or len(w) >= 6]
+
+
+def _glossary_block(terms: list[str]) -> str:
+    if not terms:
+        return ""
+    return ("KEY TERMS (transliterate each ONCE into Arabic letters and reuse "
+            "that EXACT form on every line where it appears): "
+            + " | ".join(terms) + "\n\n")
 
 
 def _make_tags(n: int) -> list[str]:
@@ -362,26 +408,35 @@ def translate_texts(texts: list[dict], provider_id: str, model: str,
     # Each text gets a unique 3-letter tag to prevent order mixups
     tags = _make_tags(n)
     tagged_texts = _tag_texts(original_texts, tags)
+    # Parallel metadata for the prompt: page markers + chapter glossary.
+    all_pages = [t.get("page") for t in texts_list]
+    batch_glossary = _extract_batch_glossary(original_texts)
 
-    def _do_request(batch_texts: list[str], batch_tags: list[str]) -> tuple[Optional[list[str]], dict]:
+    def _do_request(batch_texts: list[str], batch_tags: list[str], batch_pages: list | None = None) -> tuple[tuple[Optional[list[str]], bool] | None, dict]:
         if p["type"] == "google":
-            return translate_via_google(batch_texts, model, p["api_key"], tags=batch_tags), None
+            return translate_via_google(batch_texts, model, p["api_key"], tags=batch_tags, pages=batch_pages, glossary=batch_glossary), None
         if p["type"] == "openai":
-            res = translate_via_openai(batch_texts, model, p.get("api_key", ""), p["base_url"], tags=batch_tags)
+            res = translate_via_openai(batch_texts, model, p.get("api_key", ""), p["base_url"], tags=batch_tags, pages=batch_pages, glossary=batch_glossary)
             return res, None
         return None, {}
 
-    def _send_with_retry(batch_texts: list[str], batch_tags: list[str], max_attempts: int = 3):
+    def _send_with_retry(batch_texts: list[str], batch_tags: list[str], batch_pages: list | None = None, max_attempts: int = 3):
         last_err = None
         for attempt in range(1, max_attempts + 1):
-            res = _do_request(batch_texts, batch_tags)
-            if isinstance(res, tuple):
-                result, _ = res
+            res = _do_request(batch_texts, batch_tags, batch_pages)
+            payload, _ = res if isinstance(res, tuple) else (res, None)
+            # Payload shape is (results|None, complete_flag).
+            if isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[1], bool):
+                result, complete = payload
             else:
-                result = res
-            if result is not None and len(result) >= len(batch_texts):
+                result, complete = payload, True
+            if result is not None and complete and len(result) >= len(batch_texts):
                 return result
-            last_err = f"batch parse returned {len(result) if result else 0} of {len(batch_texts)}"
+            if result is None:
+                last_err = "request failed"
+            else:
+                missing = sum(1 for i, t in enumerate(result) if i < len(result) and not t) if isinstance(result, list) else 0
+                last_err = f"incomplete parse ({missing} lines missing, attempt {attempt})"
             time.sleep(0.5)
         return None
 
@@ -391,7 +446,7 @@ def translate_texts(texts: list[dict], provider_id: str, model: str,
 
     # ─── Step 1: Try full batch ────────────────────────────
     print(f"   [STEP1] batch translate {n} texts...")
-    full_result = _send_with_retry(tagged_texts, tags, max_attempts=1)
+    full_result = _send_with_retry(tagged_texts, tags, all_pages, max_attempts=1)
     if full_result is not None:
         _apply_results(full_result, texts_list)
         return texts_list
@@ -405,11 +460,13 @@ def translate_texts(texts: list[dict], provider_id: str, model: str,
             break
         chunk_tags = [tags[i] for i in indices]
         chunk_tagged = [tagged_texts[i] for i in indices]
-        result = _send_with_retry(chunk_tagged, chunk_tags, max_attempts=2)
+        chunk_pages = [all_pages[i] for i in indices]
+        result = _send_with_retry(chunk_tagged, chunk_tags, chunk_pages, max_attempts=2)
         if result is not None and len(result) >= len(chunk_tags):
             _apply_results(result, [texts_list[i] for i in indices])
 
     # ─── Step 3: Fill any remaining empty texts individually ──
+    # Each single carries its neighbors as context (gender/tone rescue).
     empty_indices = [i for i, t in enumerate(texts_list) if not t.get("arabic_text")]
     if empty_indices:
         print(f"   [STEP3] {len(empty_indices)} empty, translate individually...")
@@ -418,12 +475,21 @@ def translate_texts(texts: list[dict], provider_id: str, model: str,
                 print("   [!] cancelled mid-translate — keeping partial results")
                 break
             t = texts_list[idx]
-            single = _translate_single_text(t.get("original_text", ""), p, model)
+            ctx_bits = []
+            if idx > 0 and (texts_list[idx - 1].get("original_text") or "").strip():
+                ctx_bits.append("previous line: " + texts_list[idx - 1]["original_text"].strip())
+            if idx + 1 < len(texts_list) and (texts_list[idx + 1].get("original_text") or "").strip():
+                ctx_bits.append("next line: " + texts_list[idx + 1]["original_text"].strip())
+            context = " | ".join(ctx_bits)
+            single = _translate_single_text(t.get("original_text", ""), p, model, context)
             if single:
                 texts_list[idx]["arabic_text"] = single
 
-    for t in texts_list:
+    for i, t in enumerate(texts_list):
         if "arabic_text" not in t:
+            t["arabic_text"] = ""
+        # Empty source bubbles stay empty — never a ghost "." translation.
+        if not (original_texts[i] or "").strip():
             t["arabic_text"] = ""
     return texts_list
 
@@ -436,10 +502,11 @@ def _chunk_with_indices(items: list, size: int):
         yield indices, chunk
 
 
-def _translate_single_text(text: str, provider: dict, model: str) -> str:
+def _translate_single_text(text: str, provider: dict, model: str, context: str = "") -> str:
     if not text:
         return ""
     _, single_system = _get_prompts()
+    user_text = f"Context: {context}\nTranslate: {text}" if context else f"Translate: {text}"
     try:
         import urllib.request
         import json as json_mod
@@ -447,7 +514,7 @@ def _translate_single_text(text: str, provider: dict, model: str) -> str:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key']}"
             payload = {
                 "system_instruction": {"parts": [{"text": single_system}]},
-                "contents": [{"parts": [{"text": f"Translate: {text}"}]}],
+                "contents": [{"parts": [{"text": user_text}]}],
                 "generationConfig": {"temperature": 0.1, "maxOutputTokens": 512},
             }
             req = urllib.request.Request(url, data=json_mod.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
@@ -461,7 +528,7 @@ def _translate_single_text(text: str, provider: dict, model: str) -> str:
                 "model": model,
                 "messages": [
                     {"role": "system", "content": single_system},
-                    {"role": "user", "content": f"Translate: {text}"},
+                    {"role": "user", "content": user_text},
                 ],
                 "temperature": 0.1,
                 "max_tokens": 512,
@@ -568,34 +635,49 @@ def _fetch_google_models(api_key: str):
 
 # ─── PROMPT BUILDING ─────────────────────────────────────
 
-def _build_user_prompt(texts: list[str], tags: list[str] | None = None) -> str:
+def _build_user_prompt(texts: list[str], tags: list[str] | None = None, pages: list | None = None, glossary: list[str] | None = None) -> str:
+    """Single [tag] prefix only (texts arrive pre-tagged from _tag_texts).
+
+    Inserts [Page N] scene markers when page info is available (the parser
+    ignores them), then strict tag-only output instructions. The old [N]
+    double-wrap contradicted the system prompt and raised disobedience.
+    """
     lines = []
+    last_page = None
     for i, t in enumerate(texts):
-        line = (t or "").strip()
-        if not line:
-            line = "."
-        lines.append(f"[{i+1}] {line}")
+        if pages is not None and i < len(pages):
+            try:
+                pg = pages[i]
+                if pg is not None and pg != last_page:
+                    lines.append(f"[Page {pg}]")
+                    last_page = pg
+            except Exception:
+                pass
+        lines.append(t if (t or "").strip() else ".")
     passage = "\n".join(lines)
-    if tags:
-        # texts are pre-tagged, use tags for mapping
-        return (
-            f"Translate each line to Arabic:\n{passage}\n\n"
-            "Output each translation prefixed with its [tag] from above, one per line.\n"
-            "Keep the [tag] exactly. NEVER reorder, merge, split, or skip lines."
-        )
+    head = _glossary_block(glossary or [])
     return (
-        f"Translate each line to Arabic:\n{passage}\n\n"
-        "Output one Arabic line per input line, in the SAME order.\n"
-        "Keep the [N] numbering exactly. NEVER reorder, merge, split, or skip lines."
+        f"{head}Translate each line to Arabic:\n{passage}\n\n"
+        "Output each translation prefixed with its [tag] from above, one per line.\n"
+        "Keep the [tag] exactly. NEVER reorder, merge, split, or skip lines.\n"
+        "[Page N] markers are scene breaks for context only — never output them."
     )
 
 
-def _parse_output(raw: str, expected: int, tags: list[str] | None = None) -> list[str]:
+def _parse_output(raw: str, expected: int, tags: list[str] | None = None) -> tuple[list[str], bool]:
+    """Parse tagged lines. Returns (results, complete).
+
+    complete=False when any slot stayed empty -> the caller retries instead
+    of Pass-3 order-filling (which misaligned all later slots on one skip).
+    [Page N] scene markers are never content: skipped everywhere.
+    """
     import re
     result = [""] * expected
     raw_clean = re.sub(r"^```\w*\s*", "", raw, flags=re.MULTILINE)
     raw_clean = re.sub(r"\s*```\s*$", "", raw_clean, flags=re.MULTILINE)
     lines = [l.strip() for l in raw_clean.split("\n") if l.strip()]
+    lines = [l for l in lines
+             if not re.match(r"^\[Page \d+\]$", l, flags=re.IGNORECASE)]
 
     # Pass 1: extract [tag] (3+ lowercase letters) — even if prefixed by [N]
     if tags:
@@ -632,18 +714,8 @@ def _parse_output(raw: str, expected: int, tags: list[str] | None = None) -> lis
                 result[idx] = txt
                 continue
 
-    # Pass 3: fallback — fill empty slots in order
-    for line in lines:
-        if all(result):
-            break
-        line = re.sub(r"^(Output|Arabic|Translation|Here is|Arabic translation)\s*[:：]\s*", "", line, flags=re.IGNORECASE).strip()
-        if line and not line.startswith("[") and not line.startswith("("):
-            for i in range(expected):
-                if not result[i]:
-                    result[i] = line
-                    break
-
-    return result
+    complete = all(result)
+    return result, complete
 
 
 def test_connection(provider_id: str) -> tuple[bool, str]:
