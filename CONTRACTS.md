@@ -57,7 +57,10 @@
 - height = style height. Theme constants: container 970, displayed = min(natural,940), offset = (970-displayed)/2, uniform s both axes.
 - Proven accuracy: Y within 2.3px, X centers exact, 7/8 contract boxes at dx=0.0. Never re-scrape ch158 silently - use refetch (preserves translations).
 - VERIFIED MODEL (do not "fix" without live proof): `x_offset=(970-displayed)/2` ALWAYS applied; `detect_left_mode` boundary uses rendered_w/2 (verified dx=0.0 on samples — leave the detector alone). H0 clamp [0,600] EVERYWHERE (incl. fallbacks); geo_tops deduped against page_texts (no self-corroboration); `calibrate_scale_from_tops` range [0.3,3.0].
-- PITCH (anti-drift): per-page `s_xi=nat_w/min(nat_w,940)` drives BOTH `css_cumulative` pitch AND `y_px`/`height`/`font`/`stroke` — never the gap-biased Theil-Sen `sv` (it absorbs inter-image gaps and integrates error down the chapter). Worker fit == manual fit: same function, same export prefs, normalize+backup first.
+- PITCH (reverted): per-page width-derived pitch moved ALL texts on real
+  chapters — the live-verified sv model stays truth. Scrape logs
+  `sv vs width-derived` each run; drift gets fixed with real numbers only.
+  Worker fit == manual fit: same function, same export prefs, normalize+backup first.
 
 ## 8) عقد المهام (الخلفية مرئية دائماً)
 - مهام الطابور بعد إعادة التشغيل تبدأ **PAUSED** (لا تشغيل ذاتي أبداً)؛

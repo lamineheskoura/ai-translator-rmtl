@@ -302,35 +302,24 @@ def assign_texts_to_images(
         x_scale, x_offset = scale, 0.0
 
     css_cumulative = [0.0]
-    # Per-page uniform scale s_xi (CONTRACTS.md §7: displayed=min(natural,940),
-    # uniform scale both axes). sv absorbs inter-image gaps -> biased LOW, so
-    # pitch png_h/sv integrates error down the chapter; X-derived s_xi is
-    # gap-free. Fallback to median x_scale when widths are uniform/unknown.
+    # REVERTED (regression): per-page s_xi pitch/Y moved ALL texts on real
+    # chapters. The live-verified sv model (H0=275, dx=0.0, Y ±2.3px) stays
+    # the truth until real-chapter numbers prove otherwise. We only LOG the
+    # width-derived scale beside sv now, to diagnose drift with data.
     try:
-        _uniq_ws = set(w for w, _ in (png_dims or []) if w and w > 0)
-        _uniform = len(_uniq_ws) <= 1
+        _uniq_ws = [w for w, _ in (png_dims or []) if w and w > 0]
+        import statistics as _st2
+        _med_w = _st2.median(_uniq_ws) if _uniq_ws else 0
+        _s_x = (_med_w / min(_med_w, 940.0)) if _med_w > 0 else 0
+        print(f"   [i] Pitch scales: sv={scale:.4f} vs width-derived={_s_x:.4f}")
     except Exception:
-        _uniform = True
-    s_xi = [x_scale] * total_pages
-    if not _uniform:
-        try:
-            for _i in range(total_pages):
-                try:
-                    _w = png_dims[_i][0] if _i < len(png_dims) else 0
-                except Exception:
-                    _w = 0
-                if _w and _w > 0:
-                    _disp_i = min(float(_w), 940.0)
-                    if _disp_i > 0:
-                        s_xi[_i] = float(_w) / _disp_i
-        except Exception:
-            s_xi = [x_scale] * total_pages
+        pass
     for i in range(total_pages):
         if i < len(css_img_heights) and css_img_heights[i] > 0:
             css_cumulative.append(css_cumulative[-1] + css_img_heights[i])
         else:
             css_cumulative.append(
-                css_cumulative[-1] + png_dims[i][1] / s_xi[i] + gap)
+                css_cumulative[-1] + png_dims[i][1] / scale + gap)
 
     for page_idx in range(total_pages):
         page_num = page_idx + 1
@@ -377,12 +366,12 @@ def assign_texts_to_images(
             css_left_fit = float(ov["css_left_center"]) - fit_css_w / 2.0
 
             x_px = round(max(0.0, css_left_fit - x_offset) * x_scale, 2)
-            y_px = round(rel_css_top * s_xi[page_idx], 2)
+            y_px = round(rel_css_top * scale, 2)
             x_center_px = round(
                 max(0.0, ov["css_left_center"] - x_offset) * x_scale, 2)
             width_px = round(fit_css_w * x_scale, 2)
-            height_px = round(ov["css_height"] * s_xi[page_idx], 2)
-            font_px = round(ov["css_font_size"] * s_xi[page_idx], 2)
+            height_px = round(ov["css_height"] * scale, 2)
+            font_px = round(ov["css_font_size"] * scale, 2)
 
             x_px = max(0.0, x_px)
             if trust_page_id and x_px + width_px > page_width:
@@ -399,7 +388,7 @@ def assign_texts_to_images(
             # Site typography (passed through; server merges it over defaults):
             # exact text color (black/white/...) + outline from text-shadow.
             site_font = max(6.0, font_px)
-            site_stroke_w = round((ov.get("css_stroke_width") or 0) * s_xi[page_idx], 2)
+            site_stroke_w = round((ov.get("css_stroke_width") or 0) * scale, 2)
             site_style = {
                 "font": "Hayah",
                 "font_size": int(round(site_font)),
@@ -424,7 +413,7 @@ def assign_texts_to_images(
                 "height": height_px,
                 "font_size_px": site_font,
                 "line_height": ov["line_height"],
-                "scale_factor": round(s_xi[page_idx], 5),
+                "scale_factor": round(scale, 5),
                 "style": site_style,
             })
 
