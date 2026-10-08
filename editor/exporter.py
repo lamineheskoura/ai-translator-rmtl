@@ -769,6 +769,7 @@ def _render_page(background: Image.Image, texts: list[dict],
                 tb = box_draw.textbbox((0, 0), line, font=font)
                 tw = tb[2] - tb[0]
             except Exception:
+                tb = (0, 0, 0, 0)
                 tw = 0
 
             if text_align == "center":
@@ -782,9 +783,14 @@ def _render_page(background: Image.Image, texts: list[dict],
             line_box_y = start_y + (i * (base_line_h + line_gap))
             ly = line_box_y + max(0, (base_line_h - lh) / 2)
 
+            # Exact ink placement: the default "la" anchor pins the ASCENDER
+            # line at y while our slots are INK-bbox based — Arabic diacritics
+            # rise above the ascender, so text sat HIGH. Offset by the
+            # measured ink origin and the tight bbox lands exactly in slot.
+            dx, dy = lx - tb[0], ly - tb[1]
             if draw_stroke and eff_stroke_w > 0:
-                box_draw.text((lx, ly), line, font=font, fill=eff_stroke_c, stroke_width=eff_stroke_w, stroke_fill=eff_stroke_c, align="left")
-            box_draw.text((lx, ly), line, font=font, fill=text_color, align="left")
+                box_draw.text((dx, dy), line, font=font, fill=eff_stroke_c, stroke_width=eff_stroke_w, stroke_fill=eff_stroke_c, align="left")
+            box_draw.text((dx, dy), line, font=font, fill=text_color, align="left")
 
         if abs(rotation) > 0.01:
             pad = int(max(box_w, box_h) * 0.6)
