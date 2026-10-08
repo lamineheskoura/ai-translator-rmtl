@@ -266,6 +266,11 @@ def assign_texts_to_images(
     total_pages = len(png_dims)
     clamped = 0
     dropped = 0
+    # Drift visibility (zero behavior change): per-page counts of texts
+    # pinned at top (rel<0 -> y=0, the "climbing" signature) vs bottom.
+    # A top-pin rate growing with page index == cumulative pitch drift.
+    pin_top: dict[int, int] = {}
+    pin_bot: dict[int, int] = {}
 
     if trust_page_id and not any(h > 0 for h in (css_img_heights or [])):
         # No measured CSS sizes (spider path): header offset H0 (ad block
@@ -356,6 +361,10 @@ def assign_texts_to_images(
             page_css_h = page_css_end - page_css_start
             ov_css_h = ov.get("css_height", 0) or 0
             max_rel = max(0.0, page_css_h - ov_css_h)
+            if rel_css_top < 0:
+                pin_top[page_idx] = pin_top.get(page_idx, 0) + 1
+            elif rel_css_top > max_rel:
+                pin_bot[page_idx] = pin_bot.get(page_idx, 0) + 1
             rel_css_top = min(max(rel_css_top, 0.0), max_rel)
 
             # Box width = style max-width (canonical block geometry, as the
@@ -429,6 +438,19 @@ def assign_texts_to_images(
         print(f"   [!] {clamped} texts clamped inside their id-page (fallback mapping).")
     if dropped:
         print(f"   [!] {dropped} texts dropped (out of range, untrusted page).")
+    if pin_top or pin_bot:
+        pages_hit = sorted(set(pin_top) | set(pin_bot))
+        detail = ", ".join(
+            f"p{p + 1}:top{pin_top.get(p, 0)}/bot{pin_bot.get(p, 0)}"
+            for p in pages_hit)
+        print(f"   [i] Pin report (per page): {detail}")
+        top_total = sum(pin_top.values())
+        if top_total:
+            late = sum(c for p, c in pin_top.items()
+                       if p >= total_pages // 2)
+            print(f"   [{'!' if late * 2 >= top_total and top_total >= 3 else 'i'}] "
+                  f"Top-pinned texts: {top_total} total, {late} in LATER half "
+                  f"({'drift signature — pitch overshoots down the chapter' if late * 2 >= top_total and top_total >= 3 else 'scattered — no cumulative drift'})")
 
     # Self-check: Y distribution must cover the page, not hug the bottom.
     try:
