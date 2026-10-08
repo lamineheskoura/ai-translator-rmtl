@@ -264,6 +264,7 @@ def assign_texts_to_images(
     css_img_heights: list,
     trust_page_id: bool = False,
     geo_tops: dict | None = None,
+    layout=None,
 ) -> list:
     results = []
     total_pages = len(png_dims)
@@ -275,7 +276,59 @@ def assign_texts_to_images(
     pin_top: dict[int, int] = {}
     pin_bot: dict[int, int] = {}
 
-    if trust_page_id and not any(h > 0 for h in (css_img_heights or [])):
+    # Measured layout (optional): when layout carries img_tops/img_heights
+    # matching total_pages, use MEASURED tops as absolute doc positions
+    # (they already include any header offset, so h0=0 in this branch).
+    # Otherwise fall through to the EXACT legacy path below (byte-identical).
+    _m_tops: list | None = None
+    _m_heights: list | None = None
+    _m_first_top: float | None = None
+    _use_measured = False
+    if layout is not None and total_pages > 0:
+        try:
+            if isinstance(layout, dict):
+                _raw_tops = layout.get("img_tops")
+                _raw_heights = layout.get("img_heights")
+                _raw_first = layout.get("first_img_top", None)
+            else:
+                _raw_tops = getattr(layout, "img_tops", None)
+                _raw_heights = getattr(layout, "img_heights", None)
+                _raw_first = getattr(layout, "first_img_top", None)
+            if (_raw_tops is not None and _raw_heights is not None
+                    and len(_raw_tops) == total_pages
+                    and len(_raw_heights) == total_pages):
+                _m_tops = [float(x) for x in _raw_tops]
+                _m_heights = [float(x) for x in _raw_heights]
+                # Degenerate guard: matching length is not enough — all-zero
+                # heights (unloaded images) or NaN/inf would collapse every
+                # span to a point. Fall back to legacy instead.
+                import math as _m
+                if (not all(_m.isfinite(t) for t in _m_tops)
+                        or not all(_m.isfinite(h) and h > 0
+                                   for h in _m_heights)):
+                    raise ValueError("degenerate measured layout")
+                try:
+                    _m_first_top = (float(_raw_first)
+                                    if _raw_first is not None else float(_m_tops[0]))
+                except Exception:
+                    _m_first_top = float(_m_tops[0])
+                _use_measured = True
+        except Exception:
+            _m_tops = None
+            _m_heights = None
+            _m_first_top = None
+            _use_measured = False
+
+    if _use_measured:
+        # Measured tops are absolute -> no H0 added (h0=0 for mapping).
+        # H0 below is for LOGGING only (first image top clamped to [0,600]).
+        h0, gap = 0.0, 0.0
+        try:
+            _h0_log = float(_m_first_top)
+        except Exception:
+            _h0_log = 0.0
+        h0_log = max(0.0, min(600.0, _h0_log))
+    elif trust_page_id and not any(h > 0 for h in (css_img_heights or [])):
         # No measured CSS sizes (spider path): header offset H0 (ad block
         # above the first image) shifts every top down. Estimate uniform
         # scale + H0 per chapter from the tops themselves (live-verified).
@@ -285,8 +338,10 @@ def assign_texts_to_images(
             h0, gap = h0est, 0.0
         else:
             h0, gap = estimate_header_and_gaps(page_texts, png_dims, scale)
+        h0_log = h0
     else:
         h0, gap = 0.0, 0.0
+        h0_log = h0
 
     # Static layout geometry (live-browser verified on 2 chapters):
     # the site authors overlays in a ~970px container; page images render
@@ -314,9 +369,14 @@ def assign_texts_to_images(
         _med_nat_ymap = _st_ymap.median([w for w, _ in (png_dims or []) if w and w > 0])
     except Exception:
         _med_nat_ymap = 0
-    print(f"   [i] Y-map: sv={scale:.4f} H0={h0:.1f} gap={gap:.2f} med_nat={_med_nat_ymap:.0f} pages={total_pages}")
+    print(f"   [i] Y-map: sv={scale:.4f} H0={h0_log:.1f} gap={gap:.2f} med_nat={_med_nat_ymap:.0f} pages={total_pages}")
 
-    css_cumulative = [0.0]
+    if _use_measured:
+        # MEASURED tops are absolute doc positions (header already included).
+        css_cumulative = ([float(x) for x in _m_tops]
+                          + [float(_m_tops[-1]) + float(_m_heights[-1])])
+    else:
+        css_cumulative = [0.0]
     # REVERTED (regression): per-page s_xi pitch/Y moved ALL texts on real
     # chapters. The live-verified sv model (H0=275, dx=0.0, Y ±2.3px) stays
     # the truth until real-chapter numbers prove otherwise. We only LOG the
@@ -329,17 +389,54 @@ def assign_texts_to_images(
         print(f"   [i] Pitch scales: sv={scale:.4f} vs width-derived={_s_x:.4f}")
     except Exception:
         pass
-    for i in range(total_pages):
-        if i < len(css_img_heights) and css_img_heights[i] > 0:
-            css_cumulative.append(css_cumulative[-1] + css_img_heights[i])
-        else:
-            css_cumulative.append(
-                css_cumulative[-1] + png_dims[i][1] / scale + gap)
+    if not _use_measured:
+        for i in range(total_pages):
+            if i < len(css_img_heights) and css_img_heights[i] > 0:
+                css_cumulative.append(css_cumulative[-1] + css_img_heights[i])
+            else:
+                css_cumulative.append(
+                    css_cumulative[-1] + png_dims[i][1] / scale + gap)
+
+    # Containment verification (LOG ONLY, never remap/drop): count overlays
+    # whose css_top falls outside their id-page span [start, end].
+    try:
+        _ct_out = 0
+        _ct_tot = 0
+        for _ci, _arr in (page_texts or {}).items():
+            try:
+                _pi = int(_ci)
+            except Exception:
+                continue
+            if _pi < 0 or _pi >= total_pages or not _arr:
+                continue
+            if _use_measured:
+                _s = float(_m_tops[_pi])
+                _e = _s + float(_m_heights[_pi])
+            else:
+                _s = css_cumulative[_pi] + h0
+                _e = css_cumulative[_pi + 1] + h0
+            for _ov in _arr:
+                try:
+                    _t = float(_ov.get("css_top", 0) or 0)
+                except Exception:
+                    continue
+                _ct_tot += 1
+                if _t < _s or _t > _e:
+                    _ct_out += 1
+        print(f"   [i] containment: {_ct_out}/{_ct_tot} outside id-page")
+    except Exception:
+        pass
 
     for page_idx in range(total_pages):
         page_num = page_idx + 1
-        page_css_start = css_cumulative[page_idx] + h0
-        page_css_end = css_cumulative[page_idx + 1] + h0
+        if _use_measured:
+            # MEASURED: absolute tops already include header -> no H0 added;
+            # per-page pitch from measured heights.
+            page_css_start = float(_m_tops[page_idx])
+            page_css_end = page_css_start + float(_m_heights[page_idx])
+        else:
+            page_css_start = css_cumulative[page_idx] + h0
+            page_css_end = css_cumulative[page_idx + 1] + h0
         page_width, page_height = png_dims[page_idx]
         if page_width <= 0:
             # PIL dimension probe failed: fall back to the chapter's
@@ -620,11 +717,17 @@ def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path,
         print("[-] Spider fetch failed.")
         return None
     _throw_if_cancelled(should_cancel)
-    if len(result) == 6:
+    if len(result) == 7:
+        image_urls, page_texts, rendered_w, css_heights, title, geo_tops, layout = result
+    elif len(result) == 6:
         image_urls, page_texts, rendered_w, css_heights, title, geo_tops = result
+        layout = {"img_tops": [], "img_heights": [],
+                  "first_img_top": 0.0, "container_w": 0.0}
     else:  # backward compat with 5-tuple callers
         image_urls, page_texts, rendered_w, css_heights, title = result
         geo_tops = {}
+        layout = {"img_tops": [], "img_heights": [],
+                  "first_img_top": 0.0, "container_w": 0.0}
 
     total_texts = sum(len(v) for v in page_texts.values())
     print(f"[+] Images: {len(image_urls)}  |  Overlays: {total_texts}  |"
@@ -673,7 +776,8 @@ def process_chapter_spider(url: str, slug: str, ch_num: str, base_dir: Path,
 
     print(f"\n[>] Assigning text coordinates per page...")
     pages_data = assign_texts_to_images(page_texts, png_dims, scale, css_heights,
-                                        trust_page_id=True, geo_tops=geo_tops)
+                                        trust_page_id=True, geo_tops=geo_tops,
+                                        layout=layout)
     assigned_texts = sum(len(p["texts"]) for p in pages_data)
     _throw_if_cancelled(should_cancel)
 

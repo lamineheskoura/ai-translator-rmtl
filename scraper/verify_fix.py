@@ -19,7 +19,17 @@ def check_a():
            "martial-evolution-the-beast-king-awakens/chapter-158/")
     res = fetch_chapter_page(url)
     assert res is not None, "spider fetch failed"
-    image_urls, page_texts, rendered_w, css_heights, title, geo_tops = res
+    if len(res) == 7:
+        image_urls, page_texts, rendered_w, css_heights, title, geo_tops, layout = res
+    elif len(res) == 6:
+        image_urls, page_texts, rendered_w, css_heights, title, geo_tops = res
+        layout = {"img_tops": [], "img_heights": [],
+                  "first_img_top": 0.0, "container_w": 0.0}
+    else:
+        image_urls, page_texts, rendered_w, css_heights, title = res
+        geo_tops = {}
+        layout = {"img_tops": [], "img_heights": [],
+                  "first_img_top": 0.0, "container_w": 0.0}
     n_texts = sum(len(v) for v in page_texts.values())
     # cached PNG dims (avoid 54 downloads)
     d = json.load(open(
@@ -48,7 +58,17 @@ def check_b():
     url = "https://manhuarmtl.com/manga/contract-admission/chapter-1/"
     res = fetch_chapter_page(url)
     assert res is not None, "spider fetch failed"
-    image_urls, page_texts, rendered_w, css_heights, title, geo_tops = res
+    if len(res) == 7:
+        image_urls, page_texts, rendered_w, css_heights, title, geo_tops, layout = res
+    elif len(res) == 6:
+        image_urls, page_texts, rendered_w, css_heights, title, geo_tops = res
+        layout = {"img_tops": [], "img_heights": [],
+                  "first_img_top": 0.0, "container_w": 0.0}
+    else:
+        image_urls, page_texts, rendered_w, css_heights, title = res
+        geo_tops = {}
+        layout = {"img_tops": [], "img_heights": [],
+                  "first_img_top": 0.0, "container_w": 0.0}
     d = json.load(open(ROOT / "output/contract-admission/chapter_1"
                        "/chapter_data.json", encoding="utf-8"))
     png_dims = [(p["width"], p["height"]) for p in d["pages"]]

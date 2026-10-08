@@ -331,9 +331,13 @@ def extract_title(page) -> str:
 def fetch_chapter_page(url: str, timeout: int = 60000):
     """Fetch chapter with Scrapling StealthyFetcher.
 
-    Returns (image_urls, page_texts, rendered_w, css_heights, title, geo_tops)
+    Returns (image_urls, page_texts, rendered_w, css_heights, title,
+             geo_tops, layout)
     or None on failure. geo_tops = {page_idx: [tops]} for ALL overlays
     (incl. empty placeholders) used only for geometry estimation.
+    layout = {"img_tops": [...], "img_heights": [...],
+              "first_img_top": float, "container_w": float} measured via
+    JS getBoundingClientRect (empty/zeros when unavailable).
     """
     try:
         from scrapling import StealthyFetcher
@@ -360,6 +364,59 @@ def fetch_chapter_page(url: str, timeout: int = 60000):
 
     try:
         image_urls = extract_image_urls(page)
+        # ---- page layout truth via JS (SILENT fallback) ----
+        css_img_tops: list = []
+        css_img_heights: list = []
+        first_img_top = 0.0
+        container_w = 0.0
+        try:
+            _js = (
+                "(() => { try {"
+                " const imgs = Array.from(document.querySelectorAll("
+                "'.reading-content img.wp-manga-chapter-img'));"
+                " const tops = imgs.map(im => {"
+                " const r = im.getBoundingClientRect();"
+                " return r.top + (window.scrollY || 0); });"
+                " const heights = imgs.map(im => {"
+                " const r = im.getBoundingClientRect();"
+                " return r.height; });"
+                " let container_w = 0;"
+                " const cont = document.querySelector('.reading-content');"
+                " if (cont) {"
+                " const rc = cont.getBoundingClientRect();"
+                " container_w = rc.width || 0; }"
+                " const first_img_top = tops.length ? tops[0] : 0;"
+                " return {tops, heights,"
+                " first_img_top, container_w};"
+                " } catch (e) {"
+                " return {tops: [], heights: [],"
+                " first_img_top: 0, container_w: 0}; } })()"
+            )
+            _data = page.evaluate(_js)
+            _tops = []
+            _heights = []
+            _first = 0.0
+            _cont_w = 0.0
+            if isinstance(_data, dict):
+                _tops = _data.get("tops", []) or []
+                _heights = _data.get("heights", []) or []
+                _first = _data.get("first_img_top", 0.0)
+                _cont_w = _data.get("container_w", 0.0)
+            css_img_tops = [float(x) for x in (_tops or [])]
+            css_img_heights = [float(x) for x in (_heights or [])]
+            first_img_top = float(_first or 0.0)
+            container_w = float(_cont_w or 0.0)
+        except Exception:
+            css_img_tops = []
+            css_img_heights = []
+            first_img_top = 0.0
+            container_w = 0.0
+        layout = {
+            "img_tops": list(css_img_tops),
+            "img_heights": list(css_img_heights),
+            "first_img_top": float(first_img_top),
+            "container_w": float(container_w),
+        }
         # No reliable JS width measurement here; use common PNG width
         # so coordinator falls back to PNG-based estimation.
         rendered_w = 800.0
@@ -371,7 +428,8 @@ def fetch_chapter_page(url: str, timeout: int = 60000):
         total = sum(len(v) for v in page_texts.values())
         print(f"   [+] Spider: {len(image_urls)} images | {total} overlays "
               f"| rendered_w={rendered_w}")
-        return image_urls, page_texts, rendered_w, css_heights, title, geo_tops
+        return (image_urls, page_texts, rendered_w, css_heights,
+                title, geo_tops, layout)
     except Exception as e:
         print(f"   [!] Spider parse failed: {e}")
         return None
