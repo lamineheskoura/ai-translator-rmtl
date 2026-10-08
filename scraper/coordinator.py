@@ -171,16 +171,19 @@ def estimate_vertical_geometry(page_texts: dict, png_dims: list,
     # misassigned-overlay outliers), H0 within [0, 600] (ad headers are
     # small; larger means no flush box exists), else fall back below.
     h0 = None
+    h0_raw = None
     if res:
         lo = res[0]
         if 0.0 <= lo <= 600.0 and sum(1 for r in res if r <= lo + 25.0) >= 2:
-            h0 = lo
+            h0_raw = lo
+            h0 = min(lo, 275.0)
     if h0 is None:
         k = min(7, len(res))
-        h0 = sorted(res[:max(k, 1)])[max(k, 1) // 2] if res else 0.0
+        h0_raw = sorted(res[:max(k, 1)])[max(k, 1) // 2] if res else 0.0
+        h0 = min(h0_raw, 275.0)
         print(f"   [!] H0 fallback (no corroborated flush box).")
     h0 = max(0.0, min(600.0, h0))
-    print(f"   [i] Vertical geometry: s={s:.4f} H0={h0:.1f}css "
+    print(f"   [i] Vertical geometry: s={s:.4f} H0 raw={h0_raw:.1f} capped={h0:.1f}css "
           f"({len(pts)} overlays, {len(slopes)} pairs)")
     return s, h0
 
@@ -305,6 +308,13 @@ def assign_texts_to_images(
                           f"shift {x_offset:.1f}css, s_x={x_scale:.4f}")
     except Exception:
         x_scale, x_offset = scale, 0.0
+
+    try:
+        import statistics as _st_ymap
+        _med_nat_ymap = _st_ymap.median([w for w, _ in (png_dims or []) if w and w > 0])
+    except Exception:
+        _med_nat_ymap = 0
+    print(f"   [i] Y-map: sv={scale:.4f} H0={h0:.1f} gap={gap:.2f} med_nat={_med_nat_ymap:.0f} pages={total_pages}")
 
     css_cumulative = [0.0]
     # REVERTED (regression): per-page s_xi pitch/Y moved ALL texts on real
