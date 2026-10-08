@@ -1152,6 +1152,7 @@ def smart_fit_chapter(slug: str, chapter: str, payload: SmartFitPayload):
     if not json_path.exists():
         raise HTTPException(404, f"Chapter not found: {ch_dir}")
     _backup_json(json_path)
+    ex = _load_export_settings()
     with _file_transaction(json_path) as data:
         if payload.unify_stroke:
             for page in data.get("pages", []):
@@ -1164,6 +1165,9 @@ def smart_fit_chapter(slug: str, chapter: str, payload: SmartFitPayload):
                     t["style"] = st
         stats = autofit_chapter_boxes(
             data, max_grow=2.0 if payload.grow_boxes else 1.0,
+            line_gap=int(ex.get("line_gap", 2)),
+            force_stroke=bool(ex.get("force_stroke", True)),
+            export_stroke_width=float(ex.get("stroke_w", ex.get("export_stroke_w", 1.5))),
             only_pages={payload.page} if payload.scope == "page" and payload.page is not None else None)
     return {"status": "ok", "slug": slug, "chapter": chapter, **stats}
 
@@ -1540,30 +1544,6 @@ def _batch_worker():
                                 for t in page.get("texts", []) or []:
                                     if t.get("id") in tmap and not t.get("arabic_text"):
                                         t["arabic_text"] = tmap[t["id"]]
-                    # --- phase 2b: smart fit + stroke unify (same as manual) ---
-                    _at = job.get("auto_translate") or {}
-                    try:
-                        with _file_transaction(json_path) as data:
-                            if _at.get("unify_stroke"):
-                                for page in data.get("pages", []):
-                                    for t in page.get("texts", []) or []:
-                                        st = t.get("style") or {}
-                                        if not st.get("stroke_enabled"):
-                                            st["stroke_enabled"] = True
-                                            st["stroke_width"] = 1.5
-                                            st["stroke_color"] = "#ffffff"
-                                        t["style"] = st
-                            fit_stats = {"grown": 0, "shrunk": 0}
-                            if _at.get("smart_font", True):
-                                fit_stats = autofit_chapter_boxes(data)
-                        with batch_lock:
-                            batch_jobs[job_id]["log"] = (
-                                batch_jobs[job_id].get("log") or "") + (
-                                f"✓ ضبط ذكي (صناديق {fit_stats.get('grown', 0)}، "
-                                f"خط {fit_stats.get('shrunk', 0)}، "
-                                f"تعزيز {fit_stats.get('boosted', 0)})\n")
-                    except Exception as e:
-                        print(f"   [!] auto smart-fit skipped: {e}")
                     with batch_lock:
                         batch_jobs[job_id]["progress"] = 75
                         batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "✓ تمت الترجمة\n"
@@ -1575,6 +1555,53 @@ def _batch_worker():
                         batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + f"✗ translate error: {e}\n"
                     _save_queue()
                     continue
+            # --- phase 2b: smart fit + stroke unify (same as manual) ---
+            # hoisted: runs whenever smart_font is on, independent of need / scrape-only
+            _at = job.get("auto_translate") or {}
+            try:
+                fit_path = ch_dir / "chapter_data.json"
+                _backup_json(fit_path)
+                with _file_transaction(fit_path) as data:
+                    _normalize_chapter_data(data)
+                ex = {**_load_export_settings(), **(job.get("auto_export") or {})}
+                ex_line_gap = int(ex.get("line_gap", 2))
+                ex_force = bool(ex.get("force_stroke", True))
+                ex_sw = float(ex.get("stroke_w", ex.get("export_stroke_w", 1.5)))
+                ex_sc = ex.get("stroke_color", "#ffffff")
+                fit_stats = {"grown": 0, "shrunk": 0, "boosted": 0}
+                fit_skipped = False
+                with _file_transaction(fit_path) as data:
+                    if _at.get("unify_stroke"):
+                        for page in data.get("pages", []):
+                            for t in page.get("texts", []) or []:
+                                st = t.get("style") or {}
+                                if not st.get("stroke_enabled"):
+                                    st["stroke_enabled"] = True
+                                    st["stroke_width"] = ex_sw
+                                    st["stroke_color"] = ex_sc
+                                t["style"] = st
+                    if _at.get("smart_font", True):
+                        fit_stats = autofit_chapter_boxes(
+                            data, line_gap=ex_line_gap,
+                            force_stroke=ex_force,
+                            export_stroke_width=ex_sw)
+                    else:
+                        fit_skipped = True
+                with batch_lock:
+                    if fit_skipped:
+                        batch_jobs[job_id]["log"] = (
+                            batch_jobs[job_id].get("log") or "") + (
+                            "fit skipped (smart_font off)\n")
+                    else:
+                        batch_jobs[job_id]["log"] = (
+                            batch_jobs[job_id].get("log") or "") + (
+                            f"✓ ضبط ذكي (صناديق {fit_stats.get('grown', 0)}، "
+                            f"خط {fit_stats.get('shrunk', 0)}، "
+                            f"تعزيز {fit_stats.get('boosted', 0)})\n")
+            except Exception as e:
+                with batch_lock:
+                    batch_jobs[job_id]["log"] = (
+                        batch_jobs[job_id].get("log") or "") + f"✗ smart-fit error: {e}\n"
             with batch_lock:
                 if batch_jobs.get(job_id, {}).get("cancel_requested"):
                     batch_jobs[job_id]["status"] = "cancelled"
