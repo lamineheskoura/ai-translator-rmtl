@@ -773,6 +773,10 @@ input[type="checkbox"] {
 
 /* ═══ MODAL ═══ */
 .modal { position: fixed; inset: 0; z-index: 1000; }
+/* Explicit stacking scale: manage floats above the chapter list,
+   confirm floats above everything (destructive = unmissable). */
+#manage-modal { z-index: 1100; }
+#confirm-modal { z-index: 1200; }
 .modal-backdrop {
   position: absolute; inset: 0;
   background: rgba(0,0,0,0.6);

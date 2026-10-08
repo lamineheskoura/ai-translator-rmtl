@@ -661,8 +661,7 @@ function renderChapterList(filter) {
         </div>
         <div class="chapter-item-actions">
           <button class="btn-icon" onclick="resetChapter('${slug}','${chap}',event)" title="مسح الترجمة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-retry"/></svg></button>
-          <button class="btn-icon btn-icon-danger" onclick="deleteChapter('${slug}','${chap}',event)" title="حذف الفصل"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
-          <button class="btn-icon btn-icon-danger" onclick="deleteSeries('${slug}',event)" title="حذف السلسلة كاملة (كل الفصول)"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
+          <button class="btn-icon btn-icon-danger" onclick="deleteChapter('${slug}','${chap}',event)" title="حذف هذا الفصل فقط"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>
         </div>
       </div>
     `;
@@ -750,7 +749,9 @@ function renderManageList() {
     const sub = `${s.chapters.length} فصل • ${s.pages} صفحة • ${s.translated} نصاً مترجماً`;
     return `<div class="task-card"><div class="manage-row">`
       + `<input type="checkbox" class="manage-check" ${on ? 'checked' : ''} onchange="toggleManageSlug('${escJs(s.slug)}', this.checked)" aria-label="تحديد ${escHtml(s.title)}">`
-      + `<span class="task-title" title="${escHtml(s.slug)}">${escHtml(s.title)}<div class="task-sub">${escHtml(sub)}</div></span></div></div>`;
+      + `<span class="task-title" title="${escHtml(s.slug)}">${escHtml(s.title)}<div class="task-sub">${escHtml(sub)}</div></span>`
+      + `<button class="btn-icon btn-icon-danger" onclick="askDeleteSingleSeries('${escJs(s.slug)}')" title="حذف هذه السلسلة"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-trash"/></svg></button>`
+      + `</div></div>`;
   }).join('');
 }
 function toggleManageSlug(slug, on) {
@@ -762,6 +763,15 @@ function toggleManageSelectAll(on) {
   manageSelection = new Set();
   if (on) for (const s of managedSeries()) manageSelection.add(s.slug);
   renderManageList();
+}
+async function askDeleteSingleSeries(slug) {
+  const s = managedSeries().find(x => x.slug === slug);
+  const ok = await showConfirm({
+    title: 'هل أنت متأكد من الحذف؟',
+    message: `سيتم حذف "${s ? s.title : slug}" (${s ? s.chapters.length : '?'} فصلاً). الفصول المحملة فقط — الصادرات لا تُمس. تنتقل لسلة المهملات ويمكن استرجاعها.`,
+    confirmLabel: 'تأكيد الحذف',
+  });
+  if (ok) await doDeleteManaged([slug]);
 }
 async function askDeleteManaged() {
   if (!manageSelection.size) return;
@@ -789,23 +799,6 @@ async function doDeleteManaged(slugs) {
   toast(fail ? `حُذف ${done} — فشل ${fail}` : `تم حذف ${done} مانهوا`, fail ? 'warning' : 'success');
   await loadChapterList();
   renderManageList();
-}
-
-async function deleteSeries(slug, event) {
-  if (event) event.stopPropagation();
-  if (!confirm(`هل أنت متأكد من حذف السلسلة "${slug}" كاملة بكل فصولها؟ (تنتقل لسلة المهملات)`)) return;
-  try {
-    const res = await fetch(`/api/series/${encodeURIComponent(slug)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      let detail = 'خطأ';
-      try { detail = (await res.json()).detail || detail; } catch (e) {}
-      throw new Error(detail);
-    }
-    toast(`تم حذف السلسلة ${slug}`, 'success', 3000);
-    loadChapterList();
-  } catch (e) {
-    toast('خطأ في حذف السلسلة: ' + e.message, 'error', 4000);
-  }
 }
 
 async function resetChapter(slug, chapter, event) {
