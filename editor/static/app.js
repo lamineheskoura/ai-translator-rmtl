@@ -825,16 +825,18 @@ async function refreshLibrary() {
       return;
     }
     box.innerHTML = series.map(s => {
-      const sub = `محمّل: ${s.downloaded_count} فصل`
-        + (s.last_translated ? ` • آخر مترجم: فصل ${escHtml(s.last_translated)}` : ' • بلا ترجمة بعد')
+      const sub = (s.archived ? 'مؤرشفة (محذوفة من الجهاز — تُفحص) • ' : `محمّل: ${s.downloaded_count} فصل • `)
+        + (s.last_translated ? `آخر مترجم: فصل ${escHtml(s.last_translated)}` : 'بلا ترجمة بعد')
         + (s.latest_known ? ` • الأحدث: فصل ${escHtml(s.latest_known)}` : '');
       const chip = s.has_new
-        ? `<span class="task-chip is-new">جديد ${escHtml(s.latest_known)}</span>` : '';
+        ? `<span class="task-chip is-new">جديد ${escHtml(s.latest_known)}</span>`
+        : (s.archived ? `<span class="task-chip is-paused">مؤرشفة</span>` : '');
       return `<div class="task-card"><div class="task-card-top">`
         + `${chip}<span class="task-title" title="${escHtml(s.slug)}">${escHtml(s.title)}<div class="task-sub">${escHtml(sub)}</div></span></div>`
         + `<div class="task-actions">`
         + `<button class="action-btn" onclick="checkLibrarySeries('${escJs(s.slug)}')">فحص الآن</button>`
         + (s.has_new ? `<button class="action-btn" onclick="downloadLibraryNew('${escJs(s.slug)}')">تحميل الجديد</button>` : '')
+        + `<button class="action-btn" onclick="removeLibrarySeries('${escJs(s.slug)}')" title="إيقاف تتبع هذه السلسلة نهائياً">إزالة</button>`
         + `</div></div>`;
     }).join('');
   } catch (e) {
@@ -900,6 +902,22 @@ function pollLibraryCheck() {
       refreshLibrary();
     } catch (e) {}
   }, 3000);
+}
+async function removeLibrarySeries(slug) {
+  const ok = await showConfirm({
+    title: 'إيقاف تتبع السلسلة؟',
+    message: `ستُنسى "${slug}" نهائياً: لا فحص ولا إشعارات بعد اليوم. (ملفاتك المحملة لا تُمس — هذا يوقف التتبع فقط.)`,
+    confirmLabel: 'إيقاف التتبع',
+  });
+  if (!ok) return;
+  try {
+    const res = await fetch(`/api/library/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    toast('أُوقِف تتبع السلسلة', 'success');
+    refreshLibrary();
+  } catch (e) {
+    toast('خطأ: ' + e.message, 'error');
+  }
 }
 async function downloadLibraryNew(slug) {
   try {

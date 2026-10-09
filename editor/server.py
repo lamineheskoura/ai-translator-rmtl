@@ -1047,6 +1047,7 @@ def delete_chapter(slug: str, chapter: str):
         trash.mkdir(parents=True, exist_ok=True)
         dest = trash / f"{slug}__{chapter}__{int(_time.time())}"
         shutil.move(str(ch_dir), str(dest))
+        _library_forget_chapter(slug, chapter)
         return {"status": "deleted", "slug": slug, "chapter": chapter,
                 "trash": dest.name}
     except Exception as e:
@@ -1071,6 +1072,7 @@ def delete_series(slug: str):
         trash.mkdir(parents=True, exist_ok=True)
         dest = trash / f"SERIES__{slug}__{int(_time.time())}"
         shutil.move(str(slug_dir), str(dest))
+        _library_forget_chapter(slug, "")
         return {"status": "deleted", "slug": slug, "trash": dest.name}
     except Exception as e:
         raise HTTPException(500, f"Delete failed: {e}")
@@ -1523,6 +1525,14 @@ def _origin_from_url(url: str) -> str:
 def _save_library():
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        # One-generation backup: the log is irreplaceable (deleted series
+        # live ONLY here). A corrupt/lost file must never wipe history.
+        try:
+            _lf = _library_file()
+            if _lf.exists() and _lf.stat().st_size > 2:
+                shutil.copy2(str(_lf), str(_lf) + ".bak")
+        except Exception:
+            pass
         with library_lock:
             payload = copy.deepcopy(library)
         _atomic_json_dump(_library_file(), payload)
@@ -1593,6 +1603,32 @@ def _library_record_translated(slug: str, chapter: str):
         pass
 
 
+def _library_forget_chapter(slug: str, chapter: str):
+    """A deleted chapter leaves the log: drop it from downloaded, keep
+    everything else (translations history, latest_known, checks). If the
+    series has nothing left on disk it becomes archived — still checked,
+    never forgotten, until explicitly removed from the library."""
+    if not slug:
+        return
+    try:
+        with library_lock:
+            rec = library.get(slug)
+            if not rec:
+                return
+            if chapter:
+                dl = [c for c in (rec.get("chapters_downloaded") or [])
+                      if str(c) != str(chapter)]
+                rec["chapters_downloaded"] = dl
+            else:
+                rec["chapters_downloaded"] = []
+            if not rec["chapters_downloaded"]:
+                rec["archived"] = True
+            library[slug] = rec
+        _save_library()
+    except Exception:
+        pass
+
+
 def _chapter_fully_translated(data: dict) -> bool:
     total = trans = 0
     for page in data.get("pages", []) or []:
@@ -1628,7 +1664,7 @@ def _load_library():
             rec = {"slug": slug, "title": slug, "series_url": "",
                    "origin": "", "chapters_downloaded": [],
                    "last_translated": None, "latest_known": None,
-                   "last_checked": None}
+                   "last_checked": None, "archived": False}
             best_tr = None
             for ch_dir in sorted(slug_dir.iterdir(), key=_chapter_sort_key):
                 jp = ch_dir / "chapter_data.json"
@@ -2336,6 +2372,7 @@ def get_library():
                 "downloaded": dl, "downloaded_count": len(dl),
                 "last_translated": rec.get("last_translated"),
                 "latest_known": latest, "last_checked": rec.get("last_checked"),
+                "archived": bool(rec.get("archived")),
                 "has_new": has_new,
             })
         except Exception:
@@ -2409,6 +2446,20 @@ def library_new_urls(slug: str):
                 pass
         k += 1
     return {"slug": slug, "urls": urls, "count": len(urls)}
+
+
+@app.delete("/api/library/{slug}")
+def library_remove_series(slug: str):
+    """Explicitly drop a series from the log (stops all checks for it).
+
+    The ONLY way a record disappears — deletes/translations never remove it.
+    """
+    with library_lock:
+        if slug not in library:
+            raise HTTPException(404, "Series not in library")
+        library.pop(slug, None)
+    _save_library()
+    return {"status": "removed", "slug": slug}
 
 
 @app.post("/api/batch/{batch_id}/retry-failed")
