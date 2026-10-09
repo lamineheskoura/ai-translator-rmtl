@@ -1492,6 +1492,7 @@ def _load_queue():
 # of. Update checks are SEQUENTIAL (concurrency=1, paced) — never a storm.
 library: dict[str, dict] = {}
 library_lock = threading.Lock()
+check_lock = threading.Lock()
 check_queue: "queue.Queue" = queue.Queue()
 check_state: dict = {"run_id": None, "status": "idle", "total": 0,
                      "done": 0, "results": [], "cancel_requested": False,
