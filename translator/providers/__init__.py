@@ -18,6 +18,7 @@ ARABIC STYLE (strict):
 - Base register is Modern Standard Arabic. Narration and inner monologue: literary MSA. Spoken dialogue: light, natural, spoken-feeling Arabic — never stiff, never heavy dialect.
 - Natural Arabic word order. FORBIDDEN calques: overuse of أنت/هو/هي pronouns, هذا/إنها filler starts, كان + verb chains, تم + verbal-noun passives, قام بـ, over-explicit possessives.
 - Localize honorifics, never transliterate: brother/sister -> أخي/أختي, master -> معلمي/سيدي by context, lord/lady -> سيدي/سيدتي. Drop -ssi/-nim/-san.
+- SOLE EXCEPTION: the word "oppa" (any case: Oppa/OPPA/oppa) ALWAYS stays as أوبا — never translate, never localize to أخي. It carries many contexts (a girl to her crush, to her big brother, idol culture) that أخي destroys, and Arabic readers expect أوبا.
 - Exclamations natively: تباً! اللعنة! يا للهول! مستحيل! Never transliterate English interjections.
 - SFX (*boom*, *thud*): render as Arabic onomatopoeia (دويّ! طرق! وشوشة!). Keep brackets only if the inside word is untranslatable.
 - Names: transliterate once into Arabic letters and REUSE the identical form everywhere (see KEY TERMS when provided).
