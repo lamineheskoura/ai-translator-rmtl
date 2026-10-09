@@ -819,6 +819,16 @@ def scrape_new(url: str = Query(..., description="Chapter URL"),
                     t["slug"] = ch_dir.parent.name
                     t["chapter"] = ch_dir.name.replace("chapter_", "")
                     t["log"] += "\n✓ تم التحميل بنجاح\n"
+                    # Library hook: record the download (title opportunistic).
+                    try:
+                        _t = ""
+                        _jp = Path(ch_dir) / "chapter_data.json"
+                        if _jp.exists():
+                            with open(_jp, "r", encoding="utf-8") as _f:
+                                _t = (json.load(_f).get("title") or "")
+                        _library_record_download(url, t["slug"], t["chapter"], _t)
+                    except Exception:
+                        pass
                 else:
                     t["status"] = "error"
                     t["error"] = "فشل التحميل - لم يتم العثور على صور"
@@ -1005,6 +1015,12 @@ def translate_with_provider(
                 tid = t.get("id", "")
                 if tid in translated_map and not t.get("arabic_text"):
                     t["arabic_text"] = translated_map[tid]
+        # Library hook (piggyback, zero extra writes): fully translated?
+        try:
+            if _chapter_fully_translated(data):
+                _library_record_translated(slug, chapter)
+        except Exception:
+            pass
 
     total_ok = len(translated_map)
     return {"status": "ok", "translated": total_ok, "provider": provider_id, "model": model}
@@ -1469,6 +1485,389 @@ def _load_queue():
         pass
 
 
+# ─── LIBRARY (series registry + update checker) ──────────────────────
+# Records every downloaded series so translated work is never lost track
+# of. Update checks are SEQUENTIAL (concurrency=1, paced) — never a storm.
+library: dict[str, dict] = {}
+library_lock = threading.Lock()
+check_queue: "queue.Queue" = queue.Queue()
+check_state: dict = {"run_id": None, "status": "idle", "total": 0,
+                     "done": 0, "results": [], "cancel_requested": False,
+                     "started_at": 0}
+CHECK_DELAY_SEC = 3.0
+CHECK_MAX_SERIES = 50
+
+
+def _library_file() -> Path:
+    return OUTPUT_DIR / ".library.json"
+
+
+def _chapter_num_key(ch: str) -> tuple:
+    try:
+        return (0, float(ch))
+    except Exception:
+        return (1, 0.0)
+
+
+def _series_url_from_chapter_url(url: str) -> str:
+    m = re.match(r"^(https?://[^/]+/manga/[^/]+)/chapter-[0-9]+(?:\.[0-9]+)?/?",
+                 (url or "").strip())
+    return m.group(1) + "/" if m else ""
+
+
+def _origin_from_url(url: str) -> str:
+    m = re.match(r"^(https?://[^/]+)", (url or "").strip())
+    return m.group(1) if m else ""
+
+
+def _save_library():
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        with library_lock:
+            payload = copy.deepcopy(library)
+        _atomic_json_dump(_library_file(), payload)
+    except Exception:
+        pass
+
+
+def _library_upsert(slug: str, **fields):
+    if not slug:
+        return
+    with library_lock:
+        rec = library.get(slug) or {"slug": slug, "title": slug,
+                                    "series_url": "", "origin": "",
+                                    "chapters_downloaded": [],
+                                    "last_translated": None,
+                                    "latest_known": None,
+                                    "last_checked": None}
+        for k, v in fields.items():
+            rec[k] = v
+        library[slug] = rec
+    _save_library()
+
+
+def _library_record_download(url: str, slug: str, chapter: str, title: str = ""):
+    if not slug or not chapter:
+        return
+    series_url = _series_url_from_chapter_url(url)
+    origin = _origin_from_url(url)
+    with library_lock:
+        rec = library.get(slug) or {"slug": slug, "title": title or slug,
+                                    "series_url": series_url, "origin": origin,
+                                    "chapters_downloaded": [],
+                                    "last_translated": None,
+                                    "latest_known": None,
+                                    "last_checked": None}
+        if title:
+            rec["title"] = title
+        if series_url:
+            rec["series_url"] = series_url
+        if origin:
+            rec["origin"] = origin
+        dl = rec.get("chapters_downloaded") or []
+        if chapter not in dl:
+            dl.append(chapter)
+            dl.sort(key=_chapter_num_key)
+        rec["chapters_downloaded"] = dl
+        library[slug] = rec
+    _save_library()
+
+
+def _library_record_translated(slug: str, chapter: str):
+    """Mark chapter fully translated if it sorts above the current mark."""
+    if not slug or not chapter:
+        return
+    try:
+        with library_lock:
+            rec = library.get(slug)
+            if not rec:
+                return
+            cur = rec.get("last_translated")
+            if cur is None or _chapter_num_key(chapter) > _chapter_num_key(cur):
+                rec["last_translated"] = chapter
+                library[slug] = rec
+            else:
+                return
+        _save_library()
+    except Exception:
+        pass
+
+
+def _chapter_fully_translated(data: dict) -> bool:
+    total = trans = 0
+    for page in data.get("pages", []) or []:
+        for t in page.get("texts", []) or []:
+            if not (t.get("original_text") or "").strip():
+                continue
+            total += 1
+            if (t.get("arabic_text") or "").strip():
+                trans += 1
+    return total > 0 and trans >= total
+
+
+def _load_library():
+    try:
+        if _library_file().exists():
+            with open(_library_file(), "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            with library_lock:
+                for slug, rec in (saved or {}).items():
+                    if isinstance(rec, dict):
+                        library[slug] = rec
+            return
+    except Exception:
+        pass
+    # Migrate: adopt every series already on disk (translations kept).
+    try:
+        if not OUTPUT_DIR.exists():
+            return
+        for slug_dir in sorted(OUTPUT_DIR.iterdir()):
+            if not slug_dir.is_dir() or slug_dir.name.startswith("."):
+                continue
+            slug = slug_dir.name
+            rec = {"slug": slug, "title": slug, "series_url": "",
+                   "origin": "", "chapters_downloaded": [],
+                   "last_translated": None, "latest_known": None,
+                   "last_checked": None}
+            best_tr = None
+            for ch_dir in sorted(slug_dir.iterdir(), key=_chapter_sort_key):
+                jp = ch_dir / "chapter_data.json"
+                if not (ch_dir.is_dir() and jp.exists()):
+                    continue
+                try:
+                    with open(jp, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    continue
+                ch = str(d.get("chapter") or ch_dir.name.replace("chapter_", ""))
+                rec["chapters_downloaded"].append(ch)
+                if d.get("title"):
+                    rec["title"] = d["title"]
+                u = (d.get("url") or "").strip()
+                if u and not rec["series_url"]:
+                    rec["series_url"] = _series_url_from_chapter_url(u)
+                    rec["origin"] = _origin_from_url(u)
+                if _chapter_fully_translated(d):
+                    if best_tr is None or _chapter_num_key(ch) > _chapter_num_key(best_tr):
+                        best_tr = ch
+            rec["chapters_downloaded"].sort(key=_chapter_num_key)
+            rec["last_translated"] = best_tr
+            if rec["chapters_downloaded"]:
+                with library_lock:
+                    library[slug] = rec
+        _save_library()
+    except Exception:
+        pass
+
+
+def _probe_chapter(url: str, timeout: int = 10) -> str:
+    """Tri-state probe: 'alive' | 'miss' (clean 404) | 'error' (net/WAF)."""
+    try:
+        import requests
+        from scraper.series import _HEADERS
+    except Exception:
+        return "error"
+    try:
+        r = requests.head(url, headers=_HEADERS, timeout=timeout,
+                          allow_redirects=True)
+        if r.status_code == 200:
+            return "alive"
+        if r.status_code in (400, 403, 405, 501):
+            try:
+                g = requests.get(url, headers=_HEADERS, timeout=timeout)
+                if g.status_code == 200 and "reading-content" in g.text:
+                    return "alive"
+                if g.status_code == 404:
+                    return "miss"
+                return "error"
+            except Exception:
+                return "error"
+        if r.status_code == 404:
+            return "miss"
+        return "error"
+    except Exception:
+        return "error"
+
+
+def _batch_busy() -> bool:
+    try:
+        with batch_lock:
+            for j in batch_jobs.values():
+                if j.get("status") in ("queued", "scraping", "translating"):
+                    return True
+    except Exception:
+        pass
+    try:
+        with scrape_tasks_lock:
+            for t in scrape_tasks.values():
+                if not t.get("done"):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _check_worker():
+    import random
+    import time as _time
+    while True:
+        run = check_queue.get()
+        try:
+            _run_library_check(run)
+        except Exception as e:
+            try:
+                with check_lock:
+                    check_state["status"] = "failed"
+                    check_state["results"] = (
+                        check_state.get("results") or []) + [
+                        {"slug": "", "error": str(e)}]
+            except Exception:
+                pass
+        finally:
+            try:
+                check_queue.task_done()
+            except Exception:
+                pass
+
+
+def _run_library_check(run: dict):
+    import time as _time
+    import random as _random
+    run_id = run.get("run_id")
+    slugs = run.get("slugs") or []
+    with check_lock:
+        check_state.update({"run_id": run_id, "status": "running",
+                            "total": len(slugs), "done": 0, "results": [],
+                            "cancel_requested": False,
+                            "started_at": _time.time()})
+    err_streak = 0
+    for slug in slugs:
+        with check_lock:
+            if check_state.get("cancel_requested"):
+                check_state["status"] = "cancelled"
+                break
+        # Never hammer the site while production work runs: wait it out
+        # (cancel still honored), abort the run after ~10min busy.
+        _waited = 0
+        while _batch_busy():
+            with check_lock:
+                if check_state.get("cancel_requested"):
+                    break
+            _time.sleep(5)
+            _waited += 5
+            if _waited >= 600:
+                break
+        with check_lock:
+            if check_state.get("cancel_requested"):
+                check_state["status"] = "cancelled"
+                break
+        if _waited >= 600:
+            with check_lock:
+                check_state["results"].append(
+                    {"slug": slug, "deferred": True,
+                     "note": "batch busy — check later"})
+                check_state["done"] += 1
+            continue
+        res = _check_series(slug)
+        if res.get("probe") == "error":
+            err_streak += 1
+        else:
+            err_streak = 0
+        with check_lock:
+            check_state["results"].append(res)
+            check_state["done"] += 1
+        if err_streak >= 3:
+            with check_lock:
+                check_state["status"] = "stalled"
+                check_state["results"].append(
+                    {"slug": "", "note": "network/WAF trouble — stopped early, resume later"})
+            break
+        _time.sleep(CHECK_DELAY_SEC + _random.uniform(0, 1))
+    with check_lock:
+        if check_state.get("status") == "running":
+            check_state["status"] = "done"
+
+
+def _check_series(slug: str) -> dict:
+    import datetime as _dt
+    with library_lock:
+        rec = copy.deepcopy(library.get(slug) or {})
+    origin = rec.get("origin") or ""
+    if not origin:
+        surl = rec.get("series_url") or ""
+        origin = _origin_from_url(surl)
+    if not origin:
+        return {"slug": slug, "error": "no series URL known"}
+    try:
+        base = max([_chapter_num_key(c)[1] for c in
+                    (rec.get("chapters_downloaded") or [])] + [0.0])
+        if rec.get("latest_known"):
+            try:
+                base = max(base, float(rec["latest_known"]))
+            except Exception:
+                pass
+    except Exception:
+        base = 0.0
+    found: list[str] = []
+    outcome = "miss"
+    # Walk integers AND halves (12, 12.5, 13, 13.5 ...): x.5 chapters are
+    # real releases. One miss tolerated (gap), second consecutive miss ends.
+    # Hard cap of 12 probes so a runaway never storms the site.
+    seq: list[str] = []
+    _start = int(base) + 1
+    if _start < 1:
+        _start = 1
+    _k = _start
+    while len(seq) < 12:
+        seq.append(str(_k))
+        seq.append(f"{_k}.5")
+        _k += 1
+    misses = 0
+    for ch in seq:
+        url = f"{origin}/manga/{slug}/chapter-{ch}/"
+        st = _probe_chapter(url)
+        if st == "alive":
+            found.append(ch)
+            outcome = "alive"
+            misses = 0
+        elif st == "error":
+            outcome = "error"
+            break
+        else:
+            misses += 1
+            if misses >= 2:
+                break
+        _sleep_probe()
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    latest = found[-1] if found else rec.get("latest_known")
+    with library_lock:
+        if slug in library:
+            if latest:
+                try:
+                    cur = library[slug].get("latest_known")
+                    if cur is None or _chapter_num_key(str(latest)) > _chapter_num_key(str(cur)):
+                        library[slug]["latest_known"] = str(latest)
+                except Exception:
+                    library[slug]["latest_known"] = str(latest)
+            library[slug]["last_checked"] = now
+    _save_library()
+    return {"slug": slug, "latest_known": latest,
+            "new_chapters": found, "probe": outcome}
+
+
+def _sleep_probe():
+    import time as _time
+    try:
+        _time.sleep(0.5)
+    except Exception:
+        pass
+
+
+_load_library()
+_thread_check = threading.Thread(target=_check_worker, daemon=True)
+_thread_check.start()
+
+
 _CHAPTER_URL_RE = re.compile(r"/manga/([^/]+)/chapter-([0-9]+(?:\.[0-9]+)?)")
 
 
@@ -1586,6 +1985,11 @@ def _batch_worker():
                 batch_jobs[job_id]["progress"] = 40
                 batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "✓ تم السكراب\n"
             _save_queue()
+            # Library hook: record the download.
+            try:
+                _library_record_download(job.get("url", ""), slug, ch)
+            except Exception:
+                pass
             # --- phase 2: optional translate ---
             auto_tr = job.get("auto_translate")
             if auto_tr:
@@ -1732,6 +2136,15 @@ def _batch_worker():
                         batch_jobs[job_id]["progress"] = 100
                         batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "✓ تم التصدير\n"
                     _save_queue()
+                    # Library hook: fully translated at export time?
+                    try:
+                        _jp = ch_dir / "chapter_data.json"
+                        if _jp.exists():
+                            with open(_jp, "r", encoding="utf-8") as _f:
+                                if _chapter_fully_translated(json.load(_f)):
+                                    _library_record_translated(slug, ch)
+                    except Exception:
+                        pass
                 except Exception as e:
                     with batch_lock:
                         batch_jobs[job_id]["status"] = "failed"
@@ -1745,6 +2158,15 @@ def _batch_worker():
                     batch_jobs[job_id]["progress"] = 100
                     batch_jobs[job_id]["log"] = (batch_jobs[job_id].get("log") or "") + "بانتظار المراجعة\n"
                 _save_queue()
+                # Library hook: fully translated at review time?
+                try:
+                    _jp = ch_dir / "chapter_data.json"
+                    if _jp.exists():
+                        with open(_jp, "r", encoding="utf-8") as _f:
+                            if _chapter_fully_translated(json.load(_f)):
+                                _library_record_translated(slug, ch)
+                except Exception:
+                    pass
             delay = max(0.0, float(job.get("delay_sec") or 0))
             if delay > 0:
                 time.sleep(delay)
@@ -1891,6 +2313,102 @@ def resume_batch(batch_id: str):
         _batch_queue.put(jid)
     _save_queue()
     return {"status": "ok", "resumed": len(resumed), "job_ids": resumed}
+
+
+@app.get("/api/library")
+def get_library():
+    with library_lock:
+        series = copy.deepcopy(list(library.values()))
+    out = []
+    for rec in series:
+        try:
+            dl = rec.get("chapters_downloaded") or []
+            dl_max = max([_chapter_num_key(c)[1] for c in dl]) if dl else 0.0
+            latest = rec.get("latest_known")
+            has_new = False
+            try:
+                has_new = latest is not None and _chapter_num_key(str(latest))[1] > dl_max
+            except Exception:
+                has_new = False
+            out.append({
+                "slug": rec.get("slug"), "title": rec.get("title") or rec.get("slug"),
+                "series_url": rec.get("series_url") or "",
+                "downloaded": dl, "downloaded_count": len(dl),
+                "last_translated": rec.get("last_translated"),
+                "latest_known": latest, "last_checked": rec.get("last_checked"),
+                "has_new": has_new,
+            })
+        except Exception:
+            continue
+    out.sort(key=lambda r: str(r.get("title") or "").lower())
+    return {"series": out, "total": len(out)}
+
+
+@app.post("/api/library/check")
+def start_library_check(payload: Optional[dict] = None):
+    slugs = None
+    try:
+        if isinstance(payload, dict) and payload.get("slugs"):
+            slugs = [str(s) for s in payload["slugs"] if str(s).strip()]
+    except Exception:
+        slugs = None
+    with library_lock:
+        if not slugs:
+            slugs = sorted(library.keys())
+    slugs = slugs[:CHECK_MAX_SERIES]
+    if not slugs:
+        return {"status": "empty", "run_id": None}
+    with check_lock:
+        if check_state.get("status") == "running":
+            return {"status": "busy", "run_id": check_state.get("run_id")}
+        run_id = uuid.uuid4().hex
+    check_queue.put({"run_id": run_id, "slugs": slugs})
+    return {"status": "started", "run_id": run_id, "total": len(slugs)}
+
+
+@app.get("/api/library/check-status")
+def library_check_status():
+    with check_lock:
+        return copy.deepcopy(check_state)
+
+
+@app.post("/api/library/check-cancel")
+def library_check_cancel():
+    with check_lock:
+        if check_state.get("status") != "running":
+            return {"status": check_state.get("status")}
+        check_state["cancel_requested"] = True
+    return {"status": "cancelling"}
+
+
+@app.get("/api/library/{slug}/new-urls")
+def library_new_urls(slug: str):
+    with library_lock:
+        rec = copy.deepcopy(library.get(slug) or {})
+    if not rec:
+        raise HTTPException(404, "Series not in library")
+    origin = rec.get("origin") or _origin_from_url(rec.get("series_url") or "")
+    if not origin:
+        raise HTTPException(400, "No series URL known")
+    try:
+        dl_max = max([_chapter_num_key(c)[1] for c in (rec.get("chapters_downloaded") or [])] or [0.0])
+        latest = rec.get("latest_known")
+        top = float(latest) if latest is not None else dl_max
+    except Exception:
+        raise HTTPException(400, "No known chapters")
+    urls = []
+    k = int(dl_max) + 1
+    if k < 1:
+        k = 1
+    while k <= int(top) + 1 and len(urls) < 40:
+        for ch in (str(k), f"{k}.5"):
+            try:
+                if float(ch) <= top + 1e-9 and float(ch) > dl_max + 1e-9:
+                    urls.append(f"{origin}/manga/{slug}/chapter-{ch}/")
+            except Exception:
+                pass
+        k += 1
+    return {"slug": slug, "urls": urls, "count": len(urls)}
 
 
 @app.post("/api/batch/{batch_id}/retry-failed")

@@ -25,6 +25,7 @@
       <span class="menubar-sep" aria-hidden="true"></span>
       <button class="menu-btn" onclick="showChapterSelector()" title="فتح فصل موجود">فتح</button>
       <button class="menu-btn" onclick="showScrapeModal()" title="تحميل فصل من manhuarmtl.com">تحميل</button>
+      <button class="menu-btn" onclick="showLibraryModal()" title="مكتبة المانهوات: الفصول الجديدة والمترجمة">المكتبة</button>
       <button class="menu-btn" onclick="saveAll()" title="حفظ التغييرات">حفظ</button>
       <button class="menu-btn" onclick="showExportModal()" title="تصدير الصفحات">تصدير</button>
       <span class="menubar-sep" aria-hidden="true"></span>
@@ -42,9 +43,31 @@
       <span id="chapter-title-display" class="chapter-label" title="اسم الفصل الحالي">لا يوجد فصل مفتوح — اختر فصلاً</span>
       <span class="menubar-sep" aria-hidden="true"></span>
       <button id="tasks-badge" class="menu-btn hidden" onclick="showTasksModal()" title="مهام جارية في الخلفية (اضغط للعرض/الإلغاء)">مهام <span id="tasks-badge-count">0</span></button>
+      <button id="library-badge" class="menu-btn hidden" onclick="showLibraryModal()" title="فصول جديدة نزلت (اضغط للعرض)">جديد <span id="library-badge-count">0</span></button>
       <button class="menu-btn menu-btn-danger" onclick="shutdownServer()" title="إيقاف التطبيق">إيقاف</button>
     </div>
   </header>
+
+  <!-- ===== LIBRARY MODAL (series registry + update checks) ===== -->
+  <div id="library-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="library-modal-title">
+    <div class="modal-backdrop" onclick="hideLibraryModal()"></div>
+    <div class="modal-content" style="max-width:600px">
+      <div class="modal-header">
+        <h2 id="library-modal-title">مكتبة المانهوات</h2>
+        <button class="modal-close" aria-label="إغلاق" onclick="hideLibraryModal()"><svg class="ic" aria-hidden="true"><use href="icons.svg#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+          <button class="action-btn" id="library-check-all-btn" onclick="checkLibraryUpdates()">فحص الكل</button>
+          <span id="library-check-progress" style="font-size:12px;opacity:.8;"></span>
+        </div>
+        <div id="library-list" class="tasks-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn" onclick="hideLibraryModal()">إغلاق</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ===== MANAGE DOWNLOADS MODAL (ui-ux-pro-max: explicit multi-select + confirm) ===== -->
   <div id="manage-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="manage-modal-title">

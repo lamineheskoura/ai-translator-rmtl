@@ -1041,6 +1041,8 @@ body.mode-view .text-overlay.selected { border-color: var(--border-light); backg
 /* Background tasks modal rows (ui-ux-pro-max: Swiss minimalism —
    one status chip + title + progress + max 3 actions per row). */
 #tasks-badge { border-color: var(--accent); color: var(--accent); font-weight: bold; }
+#library-badge { border-color: #16a34a; color: #16a34a; font-weight: bold; }
+.task-chip.is-new { border-color: #16a34a; color: #16a34a; }
 .tasks-list { display: flex; flex-direction: column; gap: 10px; }
 .task-card {
   border: 1px solid var(--border); border-radius: var(--radius);

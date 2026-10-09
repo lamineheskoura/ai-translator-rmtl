@@ -801,6 +801,127 @@ async function doDeleteManaged(slugs) {
   renderManageList();
 }
 
+// ─── LIBRARY (series registry + update checks) ───
+let libraryPollTimer = null;
+function showLibraryModal() {
+  document.getElementById('library-modal').classList.remove('hidden');
+  refreshLibrary();
+}
+function hideLibraryModal() {
+  document.getElementById('library-modal').classList.add('hidden');
+  if (libraryPollTimer) { clearInterval(libraryPollTimer); libraryPollTimer = null; }
+  const prog = document.getElementById('library-check-progress');
+  if (prog) prog.textContent = '';
+}
+async function refreshLibrary() {
+  const box = document.getElementById('library-list');
+  try {
+    const res = await fetch('/api/library');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const series = data.series || [];
+    if (!series.length) {
+      box.innerHTML = '<div class="task-empty">المكتبة فارغة — حمّل مانهوا أولاً وستُسجل هنا تلقائياً.</div>';
+      return;
+    }
+    box.innerHTML = series.map(s => {
+      const sub = `محمّل: ${s.downloaded_count} فصل`
+        + (s.last_translated ? ` • آخر مترجم: فصل ${escHtml(s.last_translated)}` : ' • بلا ترجمة بعد')
+        + (s.latest_known ? ` • الأحدث: فصل ${escHtml(s.latest_known)}` : '');
+      const chip = s.has_new
+        ? `<span class="task-chip is-new">جديد ${escHtml(s.latest_known)}</span>` : '';
+      return `<div class="task-card"><div class="task-card-top">`
+        + `${chip}<span class="task-title" title="${escHtml(s.slug)}">${escHtml(s.title)}<div class="task-sub">${escHtml(sub)}</div></span></div>`
+        + `<div class="task-actions">`
+        + `<button class="action-btn" onclick="checkLibrarySeries('${escJs(s.slug)}')">فحص الآن</button>`
+        + (s.has_new ? `<button class="action-btn" onclick="downloadLibraryNew('${escJs(s.slug)}')">تحميل الجديد</button>` : '')
+        + `</div></div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="task-empty">تعذر تحميل المكتبة: ' + escHtml(e.message) + '</div>';
+  }
+  updateLibraryBadge();
+}
+async function updateLibraryBadge() {
+  const badge = document.getElementById('library-badge');
+  if (!badge) return;
+  try {
+    const res = await fetch('/api/library');
+    if (!res.ok) return;
+    const data = await res.json();
+    const n = (data.series || []).filter(s => s.has_new).length;
+    if (n > 0) {
+      badge.classList.remove('hidden');
+      document.getElementById('library-badge-count').textContent = n;
+    } else badge.classList.add('hidden');
+  } catch (e) {}
+}
+async function checkLibraryUpdates(slugs) {
+  try {
+    const res = await fetch('/api/library/check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(slugs ? { slugs } : {}),
+    });
+    const data = await res.json();
+    if (data.status === 'busy') { toast('فحص جارٍ بالفعل — تابع تقدمه', 'info'); return; }
+    if (data.status === 'empty') { toast('لا سلاسل في المكتبة', 'info'); return; }
+    if (!res.ok) throw new Error(data.detail || 'فشل بدء الفحص');
+    toast(`بدأ فحص ${data.total} سلسلة (متسلسل، بلا ضغط على الموقع)...`, 'info');
+    pollLibraryCheck();
+  } catch (e) {
+    toast('خطأ في بدء الفحص: ' + e.message, 'error');
+  }
+}
+async function checkLibrarySeries(slug) {
+  checkLibraryUpdates([slug]);
+}
+function pollLibraryCheck() {
+  if (libraryPollTimer) clearInterval(libraryPollTimer);
+  const prog = document.getElementById('library-check-progress');
+  libraryPollTimer = setInterval(async () => {
+    try {
+      const res = await fetch('/api/library/check-status');
+      const st = await res.json();
+      if (st.status === 'running') {
+        if (prog) prog.textContent = `يفحص... ${st.done || 0}/${st.total || 0} (متسلسل — لن يتجمد البرنامج)`;
+        return;
+      }
+      clearInterval(libraryPollTimer); libraryPollTimer = null;
+      if (prog) prog.textContent = '';
+      const news = (st.results || []).filter(r => (r.new_chapters || []).length);
+      if (news.length) {
+        const total = news.reduce((a, r) => a + r.new_chapters.length, 0);
+        toast(`فصول جديدة: ${total} في ${news.length} سلسلة — افتح المكتبة`, 'success', 8000);
+      } else if (st.status === 'done') {
+        toast('اكتمل الفحص — لا فصول جديدة', 'success');
+      } else {
+        toast('توقف الفحص: ' + (st.status || ''), 'warning');
+      }
+      refreshLibrary();
+    } catch (e) {}
+  }, 3000);
+}
+async function downloadLibraryNew(slug) {
+  try {
+    const ures = await fetch(`/api/library/${encodeURIComponent(slug)}/new-urls`);
+    const udata = await ures.json();
+    if (!ures.ok) throw new Error(udata.detail || 'فشل');
+    if (!udata.urls || !udata.urls.length) { toast('لا روابط جديدة', 'info'); return; }
+    const res = await fetch('/api/batch-scrape', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: udata.urls, headless: true, browser: 'brave', delay_sec: 3 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'فشل بدء التحميل');
+    hideLibraryModal();
+    showScrapeModal();
+    toast(`بدأ تحميل ${udata.urls.length} فصلاً جديداً`, 'success');
+    pollBatchStatus(data.batch_id);
+  } catch (e) {
+    toast('خطأ: ' + e.message, 'error');
+  }
+}
+
 async function resetChapter(slug, chapter, event) {
   event.stopPropagation();
   if (!confirm(`مسح كل الترجمة العربية من "${slug} — فصل ${chapter}"؟`)) return;
@@ -2260,7 +2381,7 @@ async function refreshTasksModal() {
 }
 function refreshTasksDrawer() { refreshTasksModal(); }
 setInterval(() => {
-  // Lightweight badge upkeep (2 small GETs every 8s); full render when open.
+  // Lightweight badge upkeep (small GETs every 8s); full render when open.
   const modal = document.getElementById('tasks-modal');
   if (modal && !modal.classList.contains('hidden')) refreshTasksModal();
   else {
@@ -2276,6 +2397,9 @@ setInterval(() => {
       }).catch(() => {});
     }).catch(() => {});
   }
+  const libModal = document.getElementById('library-modal');
+  if (libModal && !libModal.classList.contains('hidden')) refreshLibrary();
+  else updateLibraryBadge();
 }, 8000);
 async function cancelBatchJob(jobId, batchId) {
   try {
